@@ -977,32 +977,17 @@ const ToolCallGroup: React.FC<{
   const displayToolResult = hasToolResultText ? toolResultDisplay : toolResultFallback;
   const isSessionsSpawn = isSessionsSpawnToolName(rawToolName);
 
-  // Extract subagent identifier — agentId from toolInput may be absent (optional param),
-  // so fall back to taskName, or extract from childSessionKey in tool result, or use toolCallId.
+  // Extract subagent identifier — must match the priority used in the main process
+  // (openclawRuntimeAdapter.ts spawn phase): agentId → taskName → label → toolCallId
   const spawnIdentifier = useMemo(() => {
     if (!isSessionsSpawn) return '';
     const input = toolInput as Record<string, unknown> | undefined;
     if (typeof input?.agentId === 'string' && input.agentId) return input.agentId;
     if (typeof input?.taskName === 'string' && input.taskName) return input.taskName;
-    // Extract from tool result JSON: { childSessionKey: "agent:main:subagent:UUID" }
-    if (toolResult) {
-      const resultText = typeof toolResult.content === 'string' ? toolResult.content
-        : typeof toolResult.metadata?.toolResult === 'string' ? toolResult.metadata.toolResult : '';
-      try {
-        const parsed = JSON.parse(resultText);
-        if (typeof parsed?.childSessionKey === 'string') {
-          // Extract the subagent UUID or agentId portion from the key
-          const keyMatch = parsed.childSessionKey.match(/subagent:([^:]+)/);
-          if (keyMatch) return keyMatch[1];
-          return parsed.childSessionKey;
-        }
-      } catch { /* not JSON, try regex on raw text */ }
-      const keyMatch = resultText.match(/subagent:([0-9a-f-]{36})/i);
-      if (keyMatch) return keyMatch[1];
-    }
-    // Last resort: use toolCallId as unique identifier
+    if (typeof input?.label === 'string' && input.label) return input.label;
+    // Last resort: use toolCallId as unique identifier (matches main process fallback)
     return typeof toolUse.metadata?.toolUseId === 'string' ? toolUse.metadata.toolUseId : '';
-  }, [isSessionsSpawn, toolInput, toolResult, toolUse.metadata?.toolUseId]);
+  }, [isSessionsSpawn, toolInput, toolUse.metadata?.toolUseId]);
 
   // Extract childSessionKey from tool result for direct history fetch
   const spawnSessionKey = useMemo(() => {

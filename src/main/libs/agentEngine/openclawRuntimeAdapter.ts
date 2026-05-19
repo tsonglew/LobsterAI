@@ -5816,9 +5816,10 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     agentId: string,
     sessionKey?: string,
   ): Promise<Array<{ role: string; content: string }>> {
-    // 1. Try locally collected messages
+    // 1. Try locally collected messages (only serve cache if subagent is done)
+    const status = this.subagentStatus.get(agentId);
     const local = this.subagentMessages.get(agentId);
-    if (local && local.length > 0) {
+    if (local && local.length > 0 && status === 'done') {
       return local;
     }
 
@@ -5833,9 +5834,20 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
         key = matchingRun.sessionKey;
         this.subagentSessionKeys.set(agentId, key);
       }
+      // 2c. If agentId didn't match directly, check if it's a UUID that appears in any session key
+      if (!key) {
+        const runWithKeyMatch = runs.find((r) =>
+          r.sessionKey && r.sessionKey.includes(agentId),
+        );
+        if (runWithKeyMatch?.sessionKey) {
+          key = runWithKeyMatch.sessionKey;
+          this.subagentSessionKeys.set(agentId, key);
+        }
+      }
     }
 
     if (!key) {
+      console.log('[OpenClawRuntime] getSubTaskHistory: no session key resolved for agentId:', agentId, 'parentSession:', _parentSessionId);
       // Try to discover via sessions.list
       const discovered = await this.discoverSubagentSessionKey(agentId);
       if (!discovered) return [];
@@ -5843,6 +5855,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       return this.fetchSubagentHistory(discovered, agentId);
     }
 
+    console.log('[OpenClawRuntime] getSubTaskHistory: fetching history for agentId:', agentId, 'key:', key);
     return this.fetchSubagentHistory(key, agentId);
   }
 
@@ -5874,6 +5887,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
 
   /**
    * Fetch subagent conversation from gateway and cache locally.
+   * Extracts user/assistant/tool messages for display.
    */
   private async fetchSubagentHistory(
     sessionKey: string,
@@ -5888,13 +5902,62 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       }, { timeoutMs: 10_000 });
 
       if (!Array.isArray(history?.messages) || history.messages.length === 0) {
+        console.log('[OpenClawRuntime] fetchSubagentHistory: no messages returned for key:', sessionKey);
         return [];
       }
 
+      console.log('[OpenClawRuntime] fetchSubagentHistory: got', history.messages.length, 'raw messages for key:', sessionKey);
+
       const messages: Array<{ role: string; content: string }> = [];
-      for (const entry of extractGatewayHistoryEntries(history.messages)) {
-        if (entry.text.trim()) {
-          messages.push({ role: entry.role, content: entry.text });
+      for (const raw of history.messages) {
+        if (!isRecord(raw)) continue;
+        const role = typeof raw.role === 'string' ? raw.role.trim().toLowerCase() : '';
+
+        // Handle standard user/assistant/system messages
+        if (role === 'user' || role === 'assistant' || role === 'system') {
+          const text = extractGatewayMessageText(raw).trim();
+          if (text && !shouldSuppressHeartbeatText(role as 'user' | 'assistant' | 'system', text)) {
+            messages.push({ role, content: text });
+          } else if (role === 'assistant' && !text && Array.isArray(raw.content)) {
+            // Assistant message with no extractable text — may contain only tool_use blocks
+            for (const block of raw.content as unknown[]) {
+              if (!isRecord(block)) continue;
+              const blockType = typeof block.type === 'string' ? block.type : '';
+              if (blockType === 'tool_use' || blockType === 'tool_call' || blockType === 'toolCall') {
+                const toolName = typeof block.name === 'string' ? block.name : 'tool';
+                messages.push({ role: 'tool', content: `[Calling ${toolName}]` });
+              }
+            }
+          }
+          continue;
+        }
+
+        // Handle tool result messages (role = "tool_result" | "tool" | "function")
+        if (role === 'tool_result' || role === 'tool' || role === 'function') {
+          const text = extractGatewayMessageText(raw).trim();
+          const toolName = typeof raw.toolName === 'string' ? raw.toolName
+            : typeof raw.tool_name === 'string' ? raw.tool_name
+              : typeof raw.name === 'string' ? raw.name : '';
+          if (text) {
+            const prefix = toolName ? `[${toolName}] ` : '';
+            messages.push({ role: 'tool', content: `${prefix}${text}` });
+          }
+          continue;
+        }
+
+        // Handle messages with content arrays that contain tool_use blocks (no role field)
+        if (!role && Array.isArray(raw.content)) {
+          for (const block of raw.content as unknown[]) {
+            if (!isRecord(block)) continue;
+            const blockType = typeof block.type === 'string' ? block.type : '';
+            if (blockType === 'tool_use' || blockType === 'tool_call' || blockType === 'toolCall') {
+              const toolName = typeof block.name === 'string' ? block.name : 'tool';
+              messages.push({ role: 'tool', content: `[Calling ${toolName}]` });
+            } else if (blockType === 'text' && typeof block.text === 'string' && block.text.trim()) {
+              messages.push({ role: 'assistant', content: block.text.trim() });
+            }
+          }
+          continue;
         }
       }
 
@@ -5906,6 +5969,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
         this.subagentStatus.set(agentId, 'done');
       }
 
+      console.log('[OpenClawRuntime] fetchSubagentHistory: extracted', messages.length, 'display messages for agentId:', agentId);
       return messages;
     } catch (error) {
       console.warn('[OpenClawRuntime] Failed to fetch subagent history:', error);
