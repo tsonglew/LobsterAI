@@ -435,7 +435,7 @@ interface IElectronAPI {
       activeSkillIds?: string[];
       agentId?: string;
       imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string }>;
-      mediaSelection?: { mode: string; modelId?: string; modelName?: string };
+      mediaSelection?: { mode: string; modelId?: string; modelName?: string; imageModelId?: string; videoModelId?: string };
     }) => Promise<{
       success: boolean;
       session?: CoworkSession;
@@ -449,7 +449,7 @@ interface IElectronAPI {
       systemPrompt?: string;
       activeSkillIds?: string[];
       imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string }>;
-      mediaSelection?: { mode: string; modelId?: string; modelName?: string };
+      mediaSelection?: { mode: string; modelId?: string; modelName?: string; imageModelId?: string; videoModelId?: string };
       mediaReferences?: Array<{ token: string; mediaType: string; index: number; fileId: string; fileName: string; mimeType: string; localPath?: string; remoteUrl?: string; role?: string }>;
     }) => Promise<{
       success: boolean;
@@ -520,6 +520,7 @@ interface IElectronAPI {
       defaultFileName?: string;
       fileExtension?: string;
     }) => Promise<{ success: boolean; canceled?: boolean; path?: string; error?: string }>;
+    cancelMediaTask: (taskId: string) => Promise<{ success: boolean; message?: string }>;
     respondToPermission: (options: {
       requestId: string;
       result: CoworkPermissionResult;
@@ -552,6 +553,9 @@ interface IElectronAPI {
     ) => () => void;
     onStreamMessageUpdate: (
       callback: (data: { sessionId: string; messageId: string; content: string; metadata?: Record<string, unknown> }) => void,
+    ) => () => void;
+    onMediaStatusPollUpdate?: (
+      callback: (data: { sessionId: string; toolCallId: string; details: Record<string, unknown> }) => void,
     ) => () => void;
     onStreamSessionStatus: (
       callback: (data: { sessionId: string; status: CoworkSessionStatus }) => void,

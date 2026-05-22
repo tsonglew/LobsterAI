@@ -43,6 +43,10 @@ const initialState: ArtifactState = {
 
 const getPreviewTabId = (artifactId: string): string => `artifact:${artifactId}`;
 
+const isMediaArtifact = (artifact: Artifact): boolean => (
+  artifact.type === 'image' || artifact.type === 'video'
+);
+
 const findArtifactSessionId = (state: ArtifactState, artifactId: string): string | null => {
   for (const [sessionId, artifacts] of Object.entries(state.artifactsBySession)) {
     if (artifacts.some(artifact => artifact.id === artifactId)) {
@@ -153,22 +157,22 @@ const artifactSlice = createSlice({
             return;
           }
         }
-        if (artifact.filePath && artifact.remoteUrl && artifact.type === 'image') {
+        if (artifact.filePath && artifact.remoteUrl && isMediaArtifact(artifact)) {
           const dupIndex = state.artifactsBySession[sessionId].findIndex(
-            a => !a.filePath && a.type === 'image' && a.content === artifact.remoteUrl
+            a => !a.filePath && a.type === artifact.type && a.content === artifact.remoteUrl
           );
           if (dupIndex >= 0) {
             state.artifactsBySession[sessionId][dupIndex] = artifact;
             return;
           }
         }
-        if (!artifact.filePath && artifact.type === 'image' && artifact.content) {
+        if (!artifact.filePath && isMediaArtifact(artifact) && artifact.content) {
           const localExists = state.artifactsBySession[sessionId].some(
-            a => a.filePath && a.remoteUrl === artifact.content
+            a => a.type === artifact.type && a.filePath && a.remoteUrl === artifact.content
           );
           if (localExists) return;
           const dupIndex = state.artifactsBySession[sessionId].findIndex(
-            a => !a.filePath && a.type === 'image' && a.content === artifact.content
+            a => !a.filePath && a.type === artifact.type && a.content === artifact.content
           );
           if (dupIndex >= 0) {
             const old = state.artifactsBySession[sessionId][dupIndex];

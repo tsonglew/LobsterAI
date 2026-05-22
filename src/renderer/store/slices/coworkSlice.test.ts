@@ -2,14 +2,17 @@ import { expect, test } from 'vitest';
 
 import { CoworkSessionStatusValue } from '../../types/cowork';
 import coworkReducer, {
+  addMessage,
   addSession,
   setConfig,
   setCurrentSession,
   setCurrentSessionId,
   setSessions,
   updateCurrentSessionModelOverride,
+  updateMessageContent,
   updateSessionStatus,
   updateSessionTitle,
+  updateToolUseMediaStatus,
 } from './coworkSlice';
 
 const makeSession = (overrides: Partial<Parameters<typeof addSession>[0]> = {}) => ({
@@ -176,4 +179,98 @@ test('updateSessionStatus does not mark the active completed session unread', ()
   );
 
   expect(completedState.unreadSessionIds).toEqual([]);
+});
+
+test('updateToolUseMediaStatus preserves the highest media poll count', () => {
+  const state = coworkReducer(undefined, setCurrentSession(makeSession({
+    messages: [{
+      id: 'tool-1',
+      type: 'tool_use',
+      content: 'Using tool: lobsterai_video_generate',
+      timestamp: 1,
+      metadata: {
+        toolName: 'lobsterai_video_generate',
+        toolUseId: 'call-1',
+        toolInput: { action: 'status', taskId: 'task-1' },
+      },
+    }],
+    totalMessages: 1,
+  })));
+
+  const highCountState = coworkReducer(state, updateToolUseMediaStatus({
+    sessionId: 'session-1',
+    toolCallId: 'call-1',
+    details: { taskId: 'task-1', pollCount: 12 },
+  }));
+  const staleCountState = coworkReducer(highCountState, updateToolUseMediaStatus({
+    sessionId: 'session-1',
+    toolCallId: 'call-1',
+    details: { taskId: 'task-1', pollCount: 1 },
+  }));
+
+  expect(staleCountState.currentSession?.messages[0].metadata?.mediaStatusDetails).toMatchObject({
+    taskId: 'task-1',
+    pollCount: 12,
+  });
+});
+
+test('updateMessageContent preserves the highest media tool result poll count', () => {
+  const state = coworkReducer(undefined, setCurrentSession(makeSession({
+    messages: [{
+      id: 'result-1',
+      type: 'tool_result',
+      content: 'Task ID: task-1\nStatus: processing',
+      timestamp: 1,
+      metadata: {
+        toolUseId: 'call-1',
+        toolResultDetails: { taskId: 'task-1', pollCount: 12, status: 'processing' },
+      },
+    }],
+    totalMessages: 1,
+  })));
+
+  const staleCountState = coworkReducer(state, updateMessageContent({
+    sessionId: 'session-1',
+    messageId: 'result-1',
+    content: 'Task ID: task-1\nStatus: processing',
+    metadata: {
+      toolUseId: 'call-1',
+      toolResultDetails: { taskId: 'task-1', pollCount: 1, status: 'processing' },
+    },
+  }));
+
+  expect(staleCountState.currentSession?.messages[0].metadata?.toolResultDetails).toMatchObject({
+    taskId: 'task-1',
+    pollCount: 12,
+    status: 'processing',
+  });
+});
+
+test('pending media status updates are applied when the tool use arrives', () => {
+  const baseState = coworkReducer(undefined, setCurrentSession(makeSession()));
+  const pendingState = coworkReducer(baseState, updateToolUseMediaStatus({
+    sessionId: 'session-1',
+    toolCallId: 'call-1',
+    details: { taskId: 'task-1', pollCount: 7 },
+  }));
+
+  const state = coworkReducer(pendingState, addMessage({
+    sessionId: 'session-1',
+    message: {
+      id: 'tool-1',
+      type: 'tool_use',
+      content: 'Using tool: lobsterai_video_generate',
+      timestamp: 2,
+      metadata: {
+        toolName: 'lobsterai_video_generate',
+        toolUseId: 'call-1',
+        toolInput: { action: 'status', taskId: 'task-1' },
+      },
+    },
+  }));
+
+  expect(state.currentSession?.messages[0].metadata?.mediaStatusDetails).toMatchObject({
+    taskId: 'task-1',
+    pollCount: 7,
+  });
 });

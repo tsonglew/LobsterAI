@@ -21,6 +21,8 @@ export interface MediaGenerationSelection {
   mode: MediaGenerationMode;
   modelId?: string;
   modelName?: string;
+  imageModelId?: string;
+  videoModelId?: string;
 }
 
 export interface MediaTaskStatus {

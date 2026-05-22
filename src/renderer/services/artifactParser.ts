@@ -6,10 +6,111 @@ import type { CoworkMessage } from '../types/cowork';
  * Handles Windows file:// URL leading slash and backslash differences.
  */
 export function normalizeFilePathForDedup(p: string): string {
+  let normalized = p.trim();
+  if (normalized.startsWith('file:///')) {
+    normalized = normalized.slice(7);
+  } else if (normalized.startsWith('file://')) {
+    normalized = normalized.slice(7);
+  } else if (normalized.startsWith('file:/')) {
+    normalized = normalized.slice(5);
+  }
+  const queryIndex = normalized.search(/[?#]/);
+  if (queryIndex >= 0) {
+    normalized = normalized.slice(0, queryIndex);
+  }
+  try {
+    normalized = decodeURIComponent(normalized);
+  } catch {
+    // Keep the original value if it contains a literal percent sign.
+  }
   // Strip leading / before drive letter (e.g. /D:/path from file:///D:/path)
-  if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+  if (/^\/[A-Za-z]:/.test(normalized)) normalized = normalized.slice(1);
   // Unify separators and case for comparison
-  return p.replace(/\\/g, '/').toLowerCase();
+  return normalized.replace(/\\/g, '/').toLowerCase();
+}
+
+const getArtifactIdentityKeys = (artifact: Artifact): string[] => {
+  const keys: string[] = [];
+  if (artifact.filePath) {
+    keys.push(`file:${artifact.type}:${normalizeFilePathForDedup(artifact.filePath)}`);
+  }
+  const remoteUrl = artifact.remoteUrl?.trim();
+  if (remoteUrl) {
+    keys.push(`url:${artifact.type}:${remoteUrl}`);
+  }
+  if ((artifact.type === 'image' || artifact.type === 'video') && artifact.content?.trim()) {
+    keys.push(`url:${artifact.type}:${artifact.content.trim()}`);
+  }
+  const fileName = artifact.fileName?.trim() || artifact.title?.trim();
+  if (artifact.type === 'video' && fileName) {
+    keys.push(`name:${artifact.type}:${fileName.toLowerCase()}`);
+  }
+  return keys;
+};
+
+const shouldPreferArtifact = (candidate: Artifact, current: Artifact): boolean => {
+  const currentHasFileProtocol = Boolean(current.filePath && /^file:/i.test(current.filePath));
+  const candidateHasFileProtocol = Boolean(candidate.filePath && /^file:/i.test(candidate.filePath));
+  if (current.filePath && !candidate.filePath) return false;
+  if (!current.filePath && candidate.filePath) return true;
+  if (currentHasFileProtocol && candidate.filePath && !candidateHasFileProtocol) return true;
+  if (!currentHasFileProtocol && current.filePath && candidateHasFileProtocol) return false;
+  if (!current.remoteUrl && candidate.remoteUrl) return true;
+  if (!current.content && candidate.content) return true;
+  return false;
+};
+
+export function dedupeArtifactsForDisplay(artifacts: Artifact[]): Artifact[] {
+  const result: Artifact[] = [];
+  const keyToIndex = new Map<string, number>();
+
+  for (const artifact of artifacts) {
+    const keys = getArtifactIdentityKeys(artifact);
+    const existingIndex = keys
+      .map(key => keyToIndex.get(key))
+      .find((index): index is number => index !== undefined);
+
+    if (existingIndex === undefined) {
+      const nextIndex = result.length;
+      result.push(artifact);
+      for (const key of keys) {
+        keyToIndex.set(key, nextIndex);
+      }
+      continue;
+    }
+
+    if (shouldPreferArtifact(artifact, result[existingIndex])) {
+      result[existingIndex] = artifact;
+    }
+    for (const key of keys) {
+      keyToIndex.set(key, existingIndex);
+    }
+  }
+
+  return result;
+}
+
+export function hasToolResultMediaAssets(toolResultMsg: CoworkMessage | undefined): boolean {
+  if (!toolResultMsg?.metadata || toolResultMsg.metadata.isError) return false;
+
+  const details = toolResultMsg.metadata.toolResultDetails;
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return false;
+
+  const assets = (details as Record<string, unknown>).assets;
+  if (!Array.isArray(assets)) return false;
+
+  return assets.some(asset => {
+    if (!asset || typeof asset !== 'object' || Array.isArray(asset)) return false;
+    const item = asset as Record<string, unknown>;
+    if (item.type !== 'image' && item.type !== 'video') return false;
+    const url = typeof item.url === 'string' ? item.url.trim() : '';
+    const filePath = typeof item.filePath === 'string' ? item.filePath.trim() : '';
+    const localPath = typeof item.localPath === 'string' ? item.localPath.trim() : '';
+    if (item.type === 'video') {
+      return Boolean(filePath || localPath);
+    }
+    return Boolean(url || filePath || localPath);
+  });
 }
 
 const EXTENSION_TO_ARTIFACT_TYPE: Record<string, ArtifactType> = {
@@ -23,6 +124,9 @@ const EXTENSION_TO_ARTIFACT_TYPE: Record<string, ArtifactType> = {
   '.webp': 'image',
   '.bmp': 'image',
   '.avif': 'image',
+  '.mp4': 'video',
+  '.webm': 'video',
+  '.mov': 'video',
   '.mermaid': 'mermaid',
   '.mmd': 'mermaid',
   '.jsx': 'code',
@@ -41,6 +145,7 @@ const EXTENSION_TO_ARTIFACT_TYPE: Record<string, ArtifactType> = {
 };
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.avif']);
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov']);
 const BINARY_DOCUMENT_EXTENSIONS = new Set(['.docx', '.xlsx', '.pptx', '.pdf', '.csv', '.tsv', '.xls']);
 
 
@@ -50,6 +155,10 @@ export function getArtifactTypeFromExtension(ext: string): ArtifactType | null {
 
 export function isImageExtension(ext: string): boolean {
   return IMAGE_EXTENSIONS.has(ext.toLowerCase());
+}
+
+export function isVideoExtension(ext: string): boolean {
+  return VIDEO_EXTENSIONS.has(ext.toLowerCase());
 }
 
 export function isBinaryDocumentExtension(ext: string): boolean {
@@ -117,7 +226,7 @@ export function stripFileLinksFromText(text: string): string {
   return text.replace(/\[([^\]]+)\]\(file:\/\/([^)]+)\)/g, '');
 }
 
-const BARE_FILE_PATH_RE = /(?:^|[\s"'`(])(\/?(?:[^\s"'`()\[\]]+\/)*[^\s"'`()\[\]]+\.(?:png|jpe?g|gif|webp|bmp|avif|docx|xlsx|pptx|pdf|md|txt|log|csv))(?:[\s"'`)]|$)/gm;
+const BARE_FILE_PATH_RE = /(?:^|[\s"'`(])(\/?(?:[^\s"'`()\[\]]+\/)+[^\s"'`()\[\]]+\.(?:png|jpe?g|gif|webp|bmp|avif|mp4|webm|mov|docx|xlsx|pptx|pdf|md|txt|log|csv))(?:[\s"'`)]|$)/gm;
 
 export function parseFilePathsFromText(
   messageContent: string,
@@ -281,7 +390,8 @@ export function parseToolResultMediaArtifacts(
     const asset = assets[index];
     if (!asset || typeof asset !== 'object' || Array.isArray(asset)) continue;
     const item = asset as Record<string, unknown>;
-    if (item.type !== 'image') continue;
+    if (item.type !== 'image' && item.type !== 'video') continue;
+    const artifactType: ArtifactType = item.type === 'video' ? 'video' : 'image';
 
     const url = typeof item.url === 'string' && item.url.trim()
       ? item.url.trim()
@@ -291,19 +401,20 @@ export function parseToolResultMediaArtifacts(
       : typeof item.localPath === 'string' && item.localPath.trim()
         ? item.localPath.trim()
         : '';
+    if (artifactType === 'video' && !filePath) continue;
     if (!url && !filePath) continue;
 
     const filename = typeof item.filename === 'string' && item.filename.trim()
       ? item.filename.trim()
       : filePath
         ? getFileName(filePath)
-        : `generated-image-${index + 1}`;
+        : `generated-${artifactType}-${index + 1}`;
 
     artifacts.push({
       id: `artifact-media-${toolResultMsg.id}-${index}`,
       messageId: toolResultMsg.id,
       sessionId,
-      type: 'image',
+      type: artifactType,
       title: filename,
       content: filePath ? '' : url,
       fileName: filename,
@@ -315,29 +426,6 @@ export function parseToolResultMediaArtifacts(
   }
 
   return artifacts;
-}
-
-function generateTitle(type: ArtifactType, language: string, content: string): string {
-  switch (type) {
-    case 'html': {
-      const titleMatch = content.match(/<title>([^<]+)<\/title>/i);
-      return titleMatch ? titleMatch[1] : 'HTML Page';
-    }
-    case 'svg':
-      return 'SVG Image';
-    case 'mermaid':
-      return 'Mermaid Diagram';
-    case 'image':
-      return 'Image';
-    case 'markdown':
-      return 'Markdown Document';
-    case 'text':
-      return 'Text File';
-    case 'document':
-      return 'Document';
-    case 'code':
-      return `${language.charAt(0).toUpperCase() + language.slice(1)} Code`;
-  }
 }
 
 const WRITE_TOOL_NAMES = new Set(['write', 'writefile', 'write_file']);
@@ -393,8 +481,9 @@ export function parseToolArtifact(
 
   const fileName = getFileName(filePath);
   const isImage = isImageExtension(ext);
+  const isVideo = isVideoExtension(ext);
   const isBinaryDoc = isBinaryDocumentExtension(ext);
-  const content = (isImage || isBinaryDoc) ? '' : (typeof toolInput.content === 'string' ? toolInput.content : '');
+  const content = (isImage || isVideo || isBinaryDoc) ? '' : (typeof toolInput.content === 'string' ? toolInput.content : '');
 
   return {
     id: `artifact-tool-${toolUseMsg.id}`,

@@ -1,6 +1,6 @@
 export const MediaGenerationTool = {
   Image: 'lobsterai_image_generate',
-  Video: 'lobster_video_generate',
+  Video: 'lobsterai_video_generate',
 } as const;
 export type MediaGenerationTool = typeof MediaGenerationTool[keyof typeof MediaGenerationTool];
 
@@ -27,6 +27,8 @@ export type MediaSelectionState = {
   mode: MediaSelectionMode;
   modelId?: string;
   modelName?: string;
+  imageModelId?: string;
+  videoModelId?: string;
 };
 
 export type MediaGenerationGateResult =

@@ -3,6 +3,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nati
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { Readable } from 'stream';
 import { pathToFileURL } from 'url';
 
 import type { OpenClawSessionPatch } from '../common/openclawSession';
@@ -11,8 +12,8 @@ import { buildScheduledTaskEnginePrompt } from '../scheduledTask/enginePrompt';
 import { migrateScheduledTaskRunsToOpenclaw, migrateScheduledTasksToOpenclaw } from '../scheduledTask/migrate';
 import { AgentId, AgentIpcChannel } from '../shared/agent/constants';
 import { AppUpdateIpc } from '../shared/appUpdate/constants';
-import { ArtifactPreviewIpc } from '../shared/artifactPreview/constants';
-import { COWORK_MESSAGE_PAGE_SIZE, COWORK_SESSION_PAGE_SIZE } from '../shared/cowork/constants';
+import { ArtifactPreviewIpc, ArtifactPreviewProtocol } from '../shared/artifactPreview/constants';
+import { COWORK_MESSAGE_PAGE_SIZE, COWORK_SESSION_PAGE_SIZE, CoworkIpcChannel } from '../shared/cowork/constants';
 import { PlatformRegistry } from '../shared/platform';
 import { ProviderName } from '../shared/providers';
 import { AgentManager } from './agentManager';
@@ -60,12 +61,13 @@ import { createOfficePreviewSession, createPreviewSession, destroyPreviewSession
 import { getKeyfromAttribution, initializeKeyfromAttribution } from './libs/keyfromAttribution';
 import { exportLogsZip } from './libs/logExport';
 import { McpBridgeServer, type MediaGenerationRequest, type MediaGenerationResponse } from './libs/mcpBridgeServer';
-import { persistGeneratedImageAssets, persistGeneratedVideoAssets, type PersistGeneratedImageAssetsResult, type RemoteGeneratedMediaAsset } from './libs/mediaAssetPersistence';
+import { persistGeneratedImageAssets, type PersistGeneratedImageAssetsResult, type PersistedGeneratedImageAsset, persistGeneratedVideoAssets, type RemoteGeneratedMediaAsset } from './libs/mediaAssetPersistence';
 import { parsePrimaryModelRef, resolveQualifiedAgentModelRef } from './libs/openclawAgentModels';
 import {
   buildManagedSessionKey,
   DEFAULT_MANAGED_AGENT_ID,
   OpenClawChannelSessionSync,
+  parseManagedSessionKey,
 } from './libs/openclawChannelSessionSync';
 import type { ResolvedMcpServer } from './libs/openclawConfigSync';
 import { buildProviderSelection, OpenClawConfigSync } from './libs/openclawConfigSync';
@@ -120,6 +122,18 @@ import {
   type WindowRectangle,
 } from './windowState';
 
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: ArtifactPreviewProtocol.LocalFile,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+    },
+  },
+]);
+
 const gwDiagTs = (): string => {
   const d = new Date();
   const p = (n: number, w = 2) => String(n).padStart(w, '0');
@@ -160,6 +174,140 @@ const MIME_EXTENSION_MAP: Record<string, string> = {
   'application/json': '.json',
   'text/csv': '.csv',
 };
+const LOCAL_FILE_MIME_BY_EXT: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.svg': 'image/svg+xml',
+  '.avif': 'image/avif',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.m4v': 'video/x-m4v',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.pdf': 'application/pdf',
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+};
+
+type ByteRange = {
+  start: number;
+  end: number;
+};
+
+function getLocalFileProtocolPath(requestUrl: string): string {
+  const url = new URL(requestUrl);
+  let filePath = decodeURIComponent(url.pathname);
+  if (url.host && process.platform !== 'win32') {
+    filePath = `/${decodeURIComponent(url.host)}${filePath}`;
+  }
+  if (process.platform === 'win32' && /^\/[A-Za-z]:/.test(filePath)) {
+    filePath = filePath.slice(1);
+  }
+  return filePath;
+}
+
+function getLocalFileMimeType(filePath: string): string {
+  return LOCAL_FILE_MIME_BY_EXT[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
+}
+
+function parseByteRange(rangeHeader: string | null, fileSize: number): ByteRange | null {
+  if (!rangeHeader) return null;
+  const match = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
+  if (!match) return null;
+
+  const [, startText, endText] = match;
+  if (!startText && !endText) return null;
+
+  if (!startText) {
+    const suffixLength = Number(endText);
+    if (!Number.isFinite(suffixLength) || suffixLength <= 0) return null;
+    return {
+      start: Math.max(fileSize - suffixLength, 0),
+      end: Math.max(fileSize - 1, 0),
+    };
+  }
+
+  const start = Number(startText);
+  const end = endText ? Number(endText) : fileSize - 1;
+  if (
+    !Number.isFinite(start) ||
+    !Number.isFinite(end) ||
+    start < 0 ||
+    end < start ||
+    start >= fileSize
+  ) {
+    return null;
+  }
+
+  return {
+    start,
+    end: Math.min(end, fileSize - 1),
+  };
+}
+
+async function createLocalFileProtocolResponse(request: Request): Promise<Response> {
+  try {
+    const filePath = getLocalFileProtocolPath(request.url);
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile()) {
+      return new Response('Not found', { status: 404 });
+    }
+
+    const mimeType = getLocalFileMimeType(filePath);
+    const baseHeaders = {
+      'Accept-Ranges': 'bytes',
+      'Content-Type': mimeType,
+    };
+    const rangeHeader = request.headers.get('range');
+    const range = parseByteRange(rangeHeader, stat.size);
+
+    if (rangeHeader && !range) {
+      return new Response(null, {
+        status: 416,
+        headers: {
+          ...baseHeaders,
+          'Content-Range': `bytes */${stat.size}`,
+        },
+      });
+    }
+
+    if (range) {
+      const contentLength = range.end - range.start + 1;
+      return new Response(
+        Readable.toWeb(fs.createReadStream(filePath, { start: range.start, end: range.end })) as BodyInit,
+        {
+          status: 206,
+          headers: {
+            ...baseHeaders,
+            'Content-Length': String(contentLength),
+            'Content-Range': `bytes ${range.start}-${range.end}/${stat.size}`,
+          },
+        },
+      );
+    }
+
+    return new Response(
+      Readable.toWeb(fs.createReadStream(filePath)) as BodyInit,
+      {
+        status: 200,
+        headers: {
+          ...baseHeaders,
+          'Content-Length': String(stat.size),
+        },
+      },
+    );
+  } catch (error) {
+    console.warn('[ArtifactPreview] local file request failed:', error);
+    return new Response('Not found', { status: 404 });
+  }
+}
 
 function sanitizeOptionalPatchValue(
   value: unknown,
@@ -1175,6 +1323,7 @@ const getOpenClawConfigSync = (): OpenClawConfigSync => {
         return resolvedMcpServersCache;
       },
       getAskUserCallbackUrl: () => mcpBridgeServer?.askUserCallbackUrl ?? null,
+      getMediaCallbackUrl: () => mcpBridgeServer?.mediaCallbackUrl ?? null,
       getMcpBridgeSecret: () => mcpBridgeSecret,
       getAgents: () => getCoworkStore().listAgents(),
       getUserPlugins: () => getCoworkStore().listUserPlugins().map(p => ({ pluginId: p.pluginId, enabled: p.enabled, config: p.config })),
@@ -1583,35 +1732,16 @@ const startAskUserServer = async (): Promise<void> => {
     });
   });
 
-    // Media generation tool callback — handles lobsterai_image_generate / lobster_video_generate
-    mcpBridgeServer.onMediaGeneration(async (request) => {
-      if (!mediaGenerationHandler) {
-        return {
-          content: [{ type: 'text', text: 'Media generation service is not ready yet.' }],
-          isError: true,
-        };
-      }
-      return await mediaGenerationHandler(request);
-    });
-
-    const callbackUrl = mcpBridgeServer.callbackUrl;
-    const askUserCallbackUrl = mcpBridgeServer.askUserCallbackUrl;
-    const mediaCallbackUrl = mcpBridgeServer.mediaCallbackUrl;
-    if (!callbackUrl || !askUserCallbackUrl) {
-      console.error('[McpBridge] failed to get callback URL');
-      return null;
+  // Media generation tool callback — handles lobsterai_image_generate / lobsterai_video_generate
+  mcpBridgeServer.onMediaGeneration(async (request) => {
+    if (!mediaGenerationHandler) {
+      return {
+        content: [{ type: 'text', text: 'Media generation service is not ready yet.' }],
+        isError: true,
+      };
     }
-
-    console.log(`[McpBridge] started: ${tools.length} MCP tools, callback=${callbackUrl}`);
-    return { callbackUrl, askUserCallbackUrl, mediaCallbackUrl: mediaCallbackUrl || '', secret: mcpBridgeSecret, tools };
-  } catch (error) {
-    console.error('[McpBridge] startup error:', error instanceof Error ? error.stack || error.message : String(error));
-    return null;
-  }
-  })().finally(() => {
-    mcpBridgeStartPromise = null;
+    return await mediaGenerationHandler(request);
   });
-  return mcpBridgeStartPromise;
 };
 
 /**
@@ -1918,8 +2048,8 @@ interface MediaAttachmentRefMain {
   role?: string;
 }
 const mediaReferencesBySession = new Map<string, MediaAttachmentRefMain[]>();
-const persistedGeneratedImageUrls = new Set<string>();
-const persistedGeneratedVideoUrls = new Set<string>();
+const persistedGeneratedImageAssetsByUrl = new Map<string, PersistedGeneratedImageAsset>();
+const persistedGeneratedVideoAssetsByUrl = new Map<string, PersistedGeneratedImageAsset>();
 
 // Async video task polling (FR-8)
 interface MediaTaskTracker {
@@ -1933,6 +2063,8 @@ interface MediaTaskTracker {
   lastPollAt?: number;
 }
 const pendingMediaTasks = new Map<string, MediaTaskTracker>();
+const mediaStatusPollCounts = new Map<string, number>();
+const mediaTasksHandledByStatusPolling = new Set<string>();
 let mediaTaskPollTimer: ReturnType<typeof setInterval> | null = null;
 const MEDIA_POLL_FAST_MS = 10_000;
 const MEDIA_POLL_SLOW_MS = 30_000;
@@ -1942,6 +2074,7 @@ const MEDIA_POLL_FAST_COUNT = 6;
 const MEDIA_POLL_SLOW_COUNT = 18;
 const MEDIA_POLL_MEDIUM_COUNT = 10;
 const MEDIA_TASK_DEFAULT_TIMEOUT_MS = 172_800_000;
+const TERMINAL_MEDIA_TASK_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
 let lastReloadAt = 0;
 let windowStateSaveTimer: ReturnType<typeof setTimeout> | null = null;
 const MIN_RELOAD_INTERVAL_MS = 5000;
@@ -1951,6 +2084,12 @@ type AppConfigSettings = {
   language?: string;
   useSystemProxy?: boolean;
   sqliteAutoBackupEnabled?: boolean;
+};
+
+type MediaStatusPollUpdate = {
+  sessionId: string;
+  toolCallId: string;
+  details: Record<string, unknown>;
 };
 
 const getUseSystemProxyFromConfig = (config?: { useSystemProxy?: boolean }): boolean => {
@@ -1976,6 +2115,39 @@ const resolveThemeFromConfig = (config?: AppConfigSettings): 'light' | 'dark' =>
 const getInitialTheme = (): 'light' | 'dark' => {
   const config = getStore().get<AppConfigSettings>('app_config');
   return resolveThemeFromConfig(config);
+};
+
+const getMediaStatusPollKey = (sessionId: string | null, taskId: string): string =>
+  `${sessionId ?? 'unknown'}:${taskId}`;
+
+const incrementMediaStatusPollCount = (sessionId: string | null, taskId: string): number => {
+  const key = getMediaStatusPollKey(sessionId, taskId);
+  const nextCount = (mediaStatusPollCounts.get(key) ?? 0) + 1;
+  mediaStatusPollCounts.set(key, nextCount);
+  return nextCount;
+};
+
+const markMediaTaskHandledByStatusPolling = (sessionId: string, taskId: string): void => {
+  mediaTasksHandledByStatusPolling.add(getMediaStatusPollKey(sessionId, taskId));
+  pendingMediaTasks.delete(taskId);
+};
+
+const isMediaTaskHandledByStatusPolling = (sessionId: string, taskId: string): boolean =>
+  mediaTasksHandledByStatusPolling.has(getMediaStatusPollKey(sessionId, taskId));
+
+const clearMediaStatusPollCountsForSession = (sessionId: string): void => {
+  for (const key of mediaStatusPollCounts.keys()) {
+    if (key.startsWith(`${sessionId}:`)) {
+      mediaStatusPollCounts.delete(key);
+    }
+  }
+};
+
+const emitMediaStatusPollUpdate = (update: MediaStatusPollUpdate): void => {
+  BrowserWindow.getAllWindows().forEach(win => {
+    if (win.isDestroyed()) return;
+    win.webContents.send(CoworkIpcChannel.MediaStatusPollUpdate, update);
+  });
 };
 
 const getTitleBarOverlayOptions = () => {
@@ -2489,10 +2661,8 @@ if (!gotTheLock) {
     return resp;
   };
 
-  const extractSessionIdFromKey = (sessionKey: string): string | null => {
-    const prefix = 'agent:main:lobsterai:';
-    return sessionKey.startsWith(prefix) ? sessionKey.slice(prefix.length) : null;
-  };
+  const extractSessionIdFromKey = (sessionKey: string): string | null =>
+    parseManagedSessionKey(sessionKey)?.sessionId ?? null;
 
   /**
    * Handle media generation tool callbacks from the OpenClaw plugin.
@@ -2509,8 +2679,11 @@ if (!gotTheLock) {
     const selection = sessionId ? mediaSelectionBySession.get(sessionId) : undefined;
     const prompt = typeof args.prompt === 'string' ? args.prompt : '';
     const explicitModel = typeof args.model === 'string' ? args.model.trim() : '';
-    const selectedModel = explicitModel || selection?.modelId || '';
-    const selectedModelSource = explicitModel ? 'tool' : selection?.modelId ? 'selection' : 'none';
+    const resolvedModelFromSelection = tool === MediaGenerationTool.Image
+      ? (selection?.imageModelId || selection?.modelId || '')
+      : (selection?.videoModelId || selection?.modelId || '');
+    const selectedModel = explicitModel || resolvedModelFromSelection;
+    const selectedModelSource = explicitModel ? 'tool' : resolvedModelFromSelection ? 'selection' : 'none';
     console.log('[MediaGeneration] received tool request:', serializeForLog({
       tool,
       action,
@@ -2555,7 +2728,12 @@ if (!gotTheLock) {
         const models = body.data || [];
         console.log(`[MediaGeneration] server returned ${models.length} ${mediaType} models.`);
         const text = models.length > 0
-          ? `Available ${mediaType} models:\n${(models as Array<{ modelId: string; displayName: string }>).map(m => `- ${m.displayName} (${m.modelId})`).join('\n')}`
+          ? `Available ${mediaType} models:\n\n${(models as Array<{ modelId: string; displayName: string; capabilities?: string; parameterSpec?: Record<string, unknown> }>).map(m => {
+              let line = `### ${m.displayName} (model: "${m.modelId}")`;
+              if (m.capabilities) line += `\n${m.capabilities}`;
+              if (m.parameterSpec) line += `\nSupported parameters:\n${JSON.stringify(m.parameterSpec, null, 2)}`;
+              return line;
+            }).join('\n\n')}`
           : `No ${mediaType} models available.`;
         return { content: [{ type: 'text', text }], details: { status: 'succeeded', models } };
       }
@@ -2566,7 +2744,12 @@ if (!gotTheLock) {
           console.warn('[MediaGeneration] blocked status request because taskId was missing.');
           return { content: [{ type: 'text', text: 'taskId is required for status action.' }], isError: true };
         }
+        const pollCount = incrementMediaStatusPollCount(sessionId, taskId);
         const mediaType = tool === MediaGenerationTool.Image ? 'images' : 'videos';
+        const statusMediaType = tool === MediaGenerationTool.Image ? 'image' : 'video';
+        if (sessionId && statusMediaType === 'video') {
+          markMediaTaskHandledByStatusPolling(sessionId, taskId);
+        }
         console.log(`[MediaGeneration] checking ${mediaType} task status for task ${taskId}.`);
         const resp = await fetchWithAuth(`${serverBaseUrl}/api/media/${mediaType}/tasks/${taskId}`);
         console.log(`[MediaGeneration] server returned HTTP ${resp.status} for ${mediaType} task status.`);
@@ -2578,7 +2761,9 @@ if (!gotTheLock) {
         const task = body.data!;
         const status = task.status as string;
         const resultUrls = (task.resultUrls as string[]) || [];
-        const statusMediaType = tool === MediaGenerationTool.Image ? 'image' : 'video';
+        if (sessionId && TERMINAL_MEDIA_TASK_STATUSES.has(status)) {
+          pendingMediaTasks.delete(taskId);
+        }
         const assets = resultUrls.map(url => ({
           type: statusMediaType,
           url,
@@ -2586,27 +2771,24 @@ if (!gotTheLock) {
         }));
 
         let resultLines: string[];
+        let detailsAssets: unknown[] = assets;
         if (status === 'succeeded' && statusMediaType === 'image' && sessionId) {
           const persistResult = await persistGeneratedImages(sessionId, assets);
           if (persistResult && persistResult.saved.length > 0) {
+            detailsAssets = persistResult.saved;
             resultLines = persistResult.saved.map(asset =>
               `  - [${asset.filename}](${pathToFileURL(asset.filePath).toString()})`
             );
-            emitMediaTaskMessage(sessionId, `Saved generated ${persistResult.saved.length === 1 ? 'image' : 'images'}:\n${resultLines.join('\n')}`, {
-              toolResultDetails: { status: 'succeeded', assets: persistResult.saved },
-            });
           } else {
             resultLines = resultUrls.map((url, index) => `  - ![Generated image ${index + 1}](${url})`);
           }
         } else if (status === 'succeeded' && statusMediaType === 'video' && sessionId) {
           const persistResult = await persistGeneratedVideos(sessionId, assets);
           if (persistResult && persistResult.saved.length > 0) {
+            detailsAssets = persistResult.saved;
             resultLines = persistResult.saved.map(asset =>
               `  - [${asset.filename}](${pathToFileURL(asset.filePath).toString()})`
             );
-            emitMediaTaskMessage(sessionId, `Saved generated ${persistResult.saved.length === 1 ? 'video' : 'videos'}:\n${resultLines.join('\n')}`, {
-              toolResultDetails: { status: 'succeeded', assets: persistResult.saved },
-            });
           } else {
             resultLines = resultUrls.map(url => `  - ${url}`);
           }
@@ -2617,22 +2799,33 @@ if (!gotTheLock) {
         }
 
         const lines = [
-          `Task ID: ${task.taskId}`,
+          `Task ID: ${task.upstreamTaskId || task.taskId}`,
           `Status: ${status}`,
           ...(task.progress ? [`Progress: ${task.progress}%`] : []),
           ...(resultUrls.length > 0 ? [`Results:\n${resultLines.join('\n')}`] : []),
           ...(task.errorMessage ? [`Error: ${task.errorMessage}`] : []),
         ];
+        const details = {
+          taskId: String(task.taskId),
+          ...(task.upstreamTaskId ? { upstreamTaskId: String(task.upstreamTaskId) } : {}),
+          status,
+          pollCount,
+          model: task.model as string,
+          mediaType: statusMediaType,
+          ...(detailsAssets.length > 0 ? { assets: detailsAssets } : {}),
+          ...(task.quotaRemaining != null ? { billing: { quotaRemaining: task.quotaRemaining } } : {}),
+        };
+        if (sessionId) {
+          emitMediaStatusPollUpdate({
+            sessionId,
+            toolCallId: request.context.toolCallId,
+            details,
+          });
+        }
 
         return {
           content: [{ type: 'text', text: lines.join('\n') }],
-          details: {
-            taskId: String(task.taskId),
-            status,
-            model: task.model as string,
-            ...(assets.length > 0 ? { assets } : {}),
-            ...(task.quotaRemaining != null ? { billing: { quotaRemaining: task.quotaRemaining } } : {}),
-          },
+          details,
         };
       }
 
@@ -2683,6 +2876,9 @@ if (!gotTheLock) {
       if (args.durationSeconds) params.durationSeconds = args.durationSeconds;
       if (args.audio != null) params.audio = args.audio;
       if (args.watermark != null) params.watermark = args.watermark;
+      if (args.seed != null) params.seed = args.seed;
+      if (args.returnLastFrame != null) params.returnLastFrame = args.returnLastFrame;
+      if (args.cameraFixed != null) params.cameraFixed = args.cameraFixed;
       if (args.filename) params.filename = args.filename;
       if (args.providerOptions) params.providerOptions = args.providerOptions;
 
@@ -2798,6 +2994,7 @@ if (!gotTheLock) {
         mimeType: mediaType === 'image' ? 'image/png' : 'video/mp4',
         ...(args.filename ? { filename: args.filename as string } : {}),
       }));
+      let detailsAssets: unknown[] = assets;
 
       const billing: Record<string, unknown> = {};
       if (task.quotaRemaining != null) billing.quotaRemaining = task.quotaRemaining;
@@ -2809,7 +3006,7 @@ if (!gotTheLock) {
 
       const lines = [
         `${mediaType === 'image' ? 'Image' : 'Video'} generation task created.`,
-        `Task ID: ${task.taskId}`,
+        `Task ID: ${task.upstreamTaskId || task.taskId}`,
         `Model: ${task.model || selectedModel || 'default'}`,
         `Status: ${status}`,
         ...(task.quotaRemaining != null ? [`Quota remaining: ${task.quotaRemaining}`] : []),
@@ -2818,13 +3015,11 @@ if (!gotTheLock) {
       if (status === 'succeeded' && mediaType === 'image' && sessionId) {
         const persistResult = await persistGeneratedImages(sessionId, assets);
         if (persistResult && persistResult.saved.length > 0) {
+          detailsAssets = persistResult.saved;
           const fileLines = persistResult.saved.map(asset =>
             `  - [${asset.filename}](${pathToFileURL(asset.filePath).toString()})`
           );
           lines.push(`Results:\n${fileLines.join('\n')}`);
-          emitMediaTaskMessage(sessionId, `Saved generated ${persistResult.saved.length === 1 ? 'image' : 'images'}:\n${fileLines.join('\n')}`, {
-            toolResultDetails: { status: 'succeeded', assets: persistResult.saved },
-          });
         } else if (assets.length > 0) {
           const resultLines = resultUrls.map((url, index) => `  - ![Generated image ${index + 1}](${url})`);
           lines.push(`Results:\n${resultLines.join('\n')}`);
@@ -2832,13 +3027,11 @@ if (!gotTheLock) {
       } else if (status === 'succeeded' && mediaType === 'video' && sessionId) {
         const persistResult = await persistGeneratedVideos(sessionId, assets);
         if (persistResult && persistResult.saved.length > 0) {
+          detailsAssets = persistResult.saved;
           const fileLines = persistResult.saved.map(asset =>
             `  - [${asset.filename}](${pathToFileURL(asset.filePath).toString()})`
           );
           lines.push(`Results:\n${fileLines.join('\n')}`);
-          emitMediaTaskMessage(sessionId, `Saved generated ${persistResult.saved.length === 1 ? 'video' : 'videos'}:\n${fileLines.join('\n')}`, {
-            toolResultDetails: { status: 'succeeded', assets: persistResult.saved },
-          });
         } else if (assets.length > 0) {
           const resultLines = resultUrls.map(url => `  - ${url}`);
           lines.push(`Results:\n${resultLines.join('\n')}`);
@@ -2872,9 +3065,10 @@ if (!gotTheLock) {
         content: [{ type: 'text', text: lines.join('\n') }],
         details: {
           taskId: String(task.taskId),
+          ...(task.upstreamTaskId ? { upstreamTaskId: String(task.upstreamTaskId) } : {}),
           status,
           model: (task.model as string) || selectedModel,
-          ...(assets.length > 0 ? { assets } : {}),
+          ...(detailsAssets.length > 0 ? { assets: detailsAssets } : {}),
           ...(Object.keys(billing).length > 0 ? { billing } : {}),
         },
       };
@@ -2924,6 +3118,11 @@ if (!gotTheLock) {
     const tasksToRemove: string[] = [];
 
     for (const [taskId, tracker] of pendingMediaTasks) {
+      if (isMediaTaskHandledByStatusPolling(tracker.sessionId, taskId)) {
+        tasksToRemove.push(taskId);
+        continue;
+      }
+
       // Check timeout
       if (now - tracker.startedAt > tracker.timeoutMs) {
         tasksToRemove.push(taskId);
@@ -2957,30 +3156,81 @@ if (!gotTheLock) {
         if (body.code !== 0) continue;
         const task = body.data!;
         const status = task.status as string;
+        if (isMediaTaskHandledByStatusPolling(tracker.sessionId, taskId)) {
+          tasksToRemove.push(taskId);
+          continue;
+        }
 
-        if (status === 'succeeded' || status === 'failed' || status === 'cancelled') {
+        if (TERMINAL_MEDIA_TASK_STATUSES.has(status)) {
           tasksToRemove.push(taskId);
           const resultUrls = (task.resultUrls as string[]) || [];
-          const resultLines = tracker.mediaType === 'image'
-            ? resultUrls.map((_url, index) => `  - Generated image ${index + 1}`)
-            : resultUrls.map(url => `  - ${url}`);
           const assets = resultUrls.map(url => ({
             type: tracker.mediaType,
             url,
             mimeType: tracker.mediaType === 'image' ? 'image/png' : 'video/mp4',
           }));
-          const lines = [
-            `${tracker.mediaType === 'video' ? 'Video' : 'Image'} generation ${status}.`,
-            `Task ID: ${taskId}`,
-            `Model: ${tracker.model}`,
-            ...(resultUrls.length > 0 ? [`Results:\n${resultLines.join('\n')}`] : []),
-            ...(task.errorMessage ? [`Error: ${task.errorMessage}`] : []),
-          ];
-          emitMediaTaskMessage(tracker.sessionId, lines.join('\n'));
           if (status === 'succeeded' && tracker.mediaType === 'image') {
-            scheduleGeneratedImagePersistence(tracker.sessionId, assets);
+            const persistResult = await persistGeneratedImages(tracker.sessionId, assets);
+            if (persistResult && persistResult.saved.length > 0) {
+              const fileLines = persistResult.saved.map(asset => `  - [${asset.filename}](${pathToFileURL(asset.filePath).toString()})`);
+              emitMediaTaskMessage(
+                tracker.sessionId,
+                `Saved generated ${persistResult.saved.length === 1 ? 'image' : 'images'}:\n${fileLines.join('\n')}`,
+                {
+                  toolResultDetails: {
+                    status: 'succeeded',
+                    assets: persistResult.saved,
+                  },
+                },
+              );
+              console.log(`[MediaGeneration] persisted ${persistResult.saved.length} generated image assets.`);
+            } else {
+              const resultLines = resultUrls.map((_url, index) => `  - Generated image ${index + 1}`);
+              emitMediaTaskMessage(tracker.sessionId, [
+                'Image generation succeeded.',
+                `Task ID: ${taskId}`,
+                `Model: ${tracker.model}`,
+                ...(resultUrls.length > 0 ? [`Results:\n${resultLines.join('\n')}`] : []),
+                ...(task.errorMessage ? [`Error: ${task.errorMessage}`] : []),
+              ].join('\n'));
+            }
           } else if (status === 'succeeded' && tracker.mediaType === 'video') {
-            scheduleGeneratedVideoPersistence(tracker.sessionId, assets);
+            const persistResult = await persistGeneratedVideos(tracker.sessionId, assets);
+            if (persistResult && persistResult.saved.length > 0) {
+              const fileLines = persistResult.saved.map(asset => `  - [${asset.filename}](${pathToFileURL(asset.filePath).toString()})`);
+              emitMediaTaskMessage(
+                tracker.sessionId,
+                `Saved generated ${persistResult.saved.length === 1 ? 'video' : 'videos'}:\n${fileLines.join('\n')}`,
+                {
+                  toolResultDetails: {
+                    status: 'succeeded',
+                    assets: persistResult.saved,
+                  },
+                },
+              );
+              console.log(`[MediaGeneration] persisted ${persistResult.saved.length} generated video assets.`);
+            } else {
+              const resultLines = resultUrls.map(url => `  - ${url}`);
+              emitMediaTaskMessage(tracker.sessionId, [
+                'Video generation succeeded.',
+                `Task ID: ${taskId}`,
+                `Model: ${tracker.model}`,
+                ...(resultUrls.length > 0 ? [`Results:\n${resultLines.join('\n')}`] : []),
+                ...(task.errorMessage ? [`Error: ${task.errorMessage}`] : []),
+              ].join('\n'));
+            }
+          } else {
+            const resultLines = tracker.mediaType === 'image'
+              ? resultUrls.map((_url, index) => `  - Generated image ${index + 1}`)
+              : resultUrls.map(url => `  - ${url}`);
+            const lines = [
+              `${tracker.mediaType === 'video' ? 'Video' : 'Image'} generation ${status}.`,
+              `Task ID: ${taskId}`,
+              `Model: ${tracker.model}`,
+              ...(resultUrls.length > 0 ? [`Results:\n${resultLines.join('\n')}`] : []),
+              ...(task.errorMessage ? [`Error: ${task.errorMessage}`] : []),
+            ];
+            emitMediaTaskMessage(tracker.sessionId, lines.join('\n'));
           }
           // Notify renderer to refresh quota
           BrowserWindow.getAllWindows().forEach(win => {
@@ -3041,13 +3291,19 @@ if (!gotTheLock) {
       return null;
     }
 
+    const cachedAssets: PersistedGeneratedImageAsset[] = [];
     const pendingAssets = imageAssets.filter(asset => {
       const key = `${sessionId}:${asset.url.trim()}`;
-      if (persistedGeneratedImageUrls.has(key)) return false;
-      persistedGeneratedImageUrls.add(key);
+      const cached = persistedGeneratedImageAssetsByUrl.get(key);
+      if (cached) {
+        cachedAssets.push(cached);
+        return false;
+      }
       return true;
     });
-    if (pendingAssets.length === 0) return null;
+    if (pendingAssets.length === 0) {
+      return cachedAssets.length > 0 ? { saved: cachedAssets, failed: [] } : null;
+    }
 
     try {
       const result = await persistGeneratedImageAssets({
@@ -3055,36 +3311,20 @@ if (!gotTheLock) {
         assets: pendingAssets,
         fetchAsset: url => session.defaultSession.fetch(url),
       });
+      for (const saved of result.saved) {
+        persistedGeneratedImageAssetsByUrl.set(`${sessionId}:${saved.originalUrl || saved.url}`, saved);
+      }
       for (const failed of result.failed) {
-        persistedGeneratedImageUrls.delete(`${sessionId}:${failed.url}`);
         console.warn('[MediaGeneration] failed to persist generated image:', serializeForLog({ sessionId, error: failed.error }));
       }
-      return result;
+      return {
+        saved: [...cachedAssets, ...result.saved],
+        failed: result.failed,
+      };
     } catch (error) {
-      for (const asset of pendingAssets) {
-        persistedGeneratedImageUrls.delete(`${sessionId}:${asset.url.trim()}`);
-      }
       console.warn('[MediaGeneration] failed to persist generated image assets:', error);
-      return null;
+      return cachedAssets.length > 0 ? { saved: cachedAssets, failed: [] } : null;
     }
-  };
-
-  const scheduleGeneratedImagePersistence = (sessionId: string, assets: RemoteGeneratedMediaAsset[]) => {
-    void persistGeneratedImages(sessionId, assets).then(result => {
-      if (!result || result.saved.length === 0) return;
-      const fileLines = result.saved.map(asset => `  - [${asset.filename}](${pathToFileURL(asset.filePath).toString()})`);
-      emitMediaTaskMessage(
-        sessionId,
-        `Saved generated ${result.saved.length === 1 ? 'image' : 'images'}:\n${fileLines.join('\n')}`,
-        {
-          toolResultDetails: {
-            status: 'succeeded',
-            assets: result.saved,
-          },
-        },
-      );
-      console.log(`[MediaGeneration] persisted ${result.saved.length} generated image assets.`);
-    });
   };
 
   const persistGeneratedVideos = async (
@@ -3101,13 +3341,19 @@ if (!gotTheLock) {
       return null;
     }
 
+    const cachedAssets: PersistedGeneratedImageAsset[] = [];
     const pendingAssets = videoAssets.filter(asset => {
       const key = `${sessionId}:${asset.url.trim()}`;
-      if (persistedGeneratedVideoUrls.has(key)) return false;
-      persistedGeneratedVideoUrls.add(key);
+      const cached = persistedGeneratedVideoAssetsByUrl.get(key);
+      if (cached) {
+        cachedAssets.push(cached);
+        return false;
+      }
       return true;
     });
-    if (pendingAssets.length === 0) return null;
+    if (pendingAssets.length === 0) {
+      return cachedAssets.length > 0 ? { saved: cachedAssets, failed: [] } : null;
+    }
 
     try {
       const result = await persistGeneratedVideoAssets({
@@ -3115,36 +3361,20 @@ if (!gotTheLock) {
         assets: pendingAssets,
         fetchAsset: url => session.defaultSession.fetch(url),
       });
+      for (const saved of result.saved) {
+        persistedGeneratedVideoAssetsByUrl.set(`${sessionId}:${saved.originalUrl || saved.url}`, saved);
+      }
       for (const failed of result.failed) {
-        persistedGeneratedVideoUrls.delete(`${sessionId}:${failed.url}`);
         console.warn('[MediaGeneration] failed to persist generated video:', serializeForLog({ sessionId, error: failed.error }));
       }
-      return result;
+      return {
+        saved: [...cachedAssets, ...result.saved],
+        failed: result.failed,
+      };
     } catch (error) {
-      for (const asset of pendingAssets) {
-        persistedGeneratedVideoUrls.delete(`${sessionId}:${asset.url.trim()}`);
-      }
       console.warn('[MediaGeneration] failed to persist generated video assets:', error);
-      return null;
+      return cachedAssets.length > 0 ? { saved: cachedAssets, failed: [] } : null;
     }
-  };
-
-  const scheduleGeneratedVideoPersistence = (sessionId: string, assets: RemoteGeneratedMediaAsset[]) => {
-    void persistGeneratedVideos(sessionId, assets).then(result => {
-      if (!result || result.saved.length === 0) return;
-      const fileLines = result.saved.map(asset => `  - [${asset.filename}](${pathToFileURL(asset.filePath).toString()})`);
-      emitMediaTaskMessage(
-        sessionId,
-        `Saved generated ${result.saved.length === 1 ? 'video' : 'videos'}:\n${fileLines.join('\n')}`,
-        {
-          toolResultDetails: {
-            status: 'succeeded',
-            assets: result.saved,
-          },
-        },
-      );
-      console.log(`[MediaGeneration] persisted ${result.saved.length} generated video assets.`);
-    });
   };
 
   /**
@@ -3760,7 +3990,7 @@ if (!gotTheLock) {
     imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string }>;
     agentId?: string;
     modelOverride?: string;
-    mediaSelection?: { mode: 'auto' | 'image' | 'video' | 'none'; modelId?: string; modelName?: string };
+    mediaSelection?: { mode: 'auto' | 'image' | 'video' | 'none'; modelId?: string; modelName?: string; imageModelId?: string; videoModelId?: string };
   }) => {
     try {
       const engineStatus = await ensureOpenClawRunningForCowork();
@@ -3892,7 +4122,7 @@ if (!gotTheLock) {
     systemPrompt?: string;
     activeSkillIds?: string[];
     imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string }>;
-    mediaSelection?: { mode: 'auto' | 'image' | 'video' | 'none'; modelId?: string; modelName?: string };
+    mediaSelection?: { mode: 'auto' | 'image' | 'video' | 'none'; modelId?: string; modelName?: string; imageModelId?: string; videoModelId?: string };
     mediaReferences?: MediaAttachmentRefMain[];
   }) => {
     try {
@@ -3989,6 +4219,10 @@ if (!gotTheLock) {
       for (const [taskId, tracker] of pendingMediaTasks) {
         if (tracker.sessionId === sessionId) pendingMediaTasks.delete(taskId);
       }
+      for (const key of mediaTasksHandledByStatusPolling) {
+        if (key.startsWith(`${sessionId}:`)) mediaTasksHandledByStatusPolling.delete(key);
+      }
+      clearMediaStatusPollCountsForSession(sessionId);
       // Clean up IM session mapping so that new channel messages
       // create a fresh session instead of referencing a deleted one.
       try {
@@ -4422,6 +4656,24 @@ if (!gotTheLock) {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to export session',
       };
+    }
+  });
+
+  ipcMain.handle('cowork:media:cancel', async (_event, taskId: string) => {
+    try {
+      const serverBaseUrl = getServerApiBaseUrl();
+      const resp = await fetchWithAuth(`${serverBaseUrl}/api/media/videos/tasks/${taskId}/cancel`, { method: 'POST' });
+      const body = await resp.json() as { code: number; message?: string };
+      if (body.code === 0) {
+        return { success: true };
+      }
+      const msg = body.message || '';
+      if (msg.includes('409') || msg.includes('running') || msg.includes('Conflict')) {
+        return { success: false, message: 'Task is already running and cannot be cancelled.' };
+      }
+      return { success: false, message: msg || 'Cancel failed' };
+    } catch (error) {
+      return { success: false, message: error instanceof Error ? error.message : 'Cancel failed' };
     }
   });
 
@@ -6722,11 +6974,11 @@ end tell'`, { timeout: 5000 });
         "default-src 'self'",
         isDev ? `script-src 'self' 'unsafe-inline' http://localhost:${devPort} ws://localhost:${devPort}` : "script-src 'self'",
         "style-src 'self' 'unsafe-inline' https:",
-        "img-src 'self' data: https: http: localfile:",
+        `img-src 'self' data: https: http: ${ArtifactPreviewProtocol.LocalFile}:`,
         // 允许连接到所有域名，不做限制
         "connect-src *",
         "font-src 'self' data: https:",
-        "media-src 'self'",
+        `media-src 'self' data: blob: file: https: http: ${ArtifactPreviewProtocol.LocalFile}:`,
         "worker-src 'self' blob:",
         "frame-src 'self' file: http://127.0.0.1:*"
       ];
@@ -7003,6 +7255,8 @@ end tell'`, { timeout: 5000 });
     skillManager?.stopWatching();
     stopMediaPollTimer();
     pendingMediaTasks.clear();
+    mediaTasksHandledByStatusPolling.clear();
+    mediaStatusPollCounts.clear();
 
     // Stop Cowork sessions without blocking shutdown.
     if (coworkEngineRouter) {
@@ -7118,12 +7372,8 @@ end tell'`, { timeout: 5000 });
     }
     console.log('[Main] initApp: default project dir ensured');
 
-    // 注册 localfile:// 自定义协议，用于安全加载本地文件（图片等）
-    protocol.handle('localfile', (request) => {
-      const url = new URL(request.url);
-      const filePath = decodeURIComponent(url.pathname);
-      return net.fetch(`file://${filePath}`);
-    });
+    // 注册 localfile:// 自定义协议，用于安全加载本地媒体文件。
+    protocol.handle(ArtifactPreviewProtocol.LocalFile, createLocalFileProtocolResponse);
 
     profiler.mark('initStore');
     console.log('[Main] initApp: starting initStore()');

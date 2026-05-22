@@ -1,5 +1,5 @@
 import Lottie from 'lottie-react';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 
 import mediaGeneratingAnimation from '../../assets/lottie/media-generating.json';
 import { i18nService } from '../../services/i18n';
@@ -9,6 +9,9 @@ export type MediaPollingGroup = {
   type: 'media_polling_group';
   toolName: string;
   taskId: string;
+  upstreamTaskId?: string;
+  lastStatus?: string | null;
+  pollCount: number;
   polls: ToolGroupItem[];
   isComplete: boolean;
 };
@@ -17,8 +20,14 @@ const MediaPollingIndicator: React.FC<{
   group: MediaPollingGroup;
   isLastInSequence?: boolean;
 }> = ({ group, isLastInSequence = true }) => {
-  const pollCount = group.polls.length;
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const pollCount = group.pollCount;
+  const collapsedPollCount = group.polls.length;
   const isVideo = group.toolName.includes('video');
+
+  const canCancel = !group.isComplete && group.taskId
+    && (group.lastStatus === 'queued' || (group.lastStatus == null && collapsedPollCount <= 1));
 
   const label = group.isComplete
     ? i18nService.t('mediaGenerationComplete')
@@ -26,7 +35,29 @@ const MediaPollingIndicator: React.FC<{
       ? i18nService.t('mediaGeneratingVideo')
       : i18nService.t('mediaGeneratingImage');
 
-  const pollCountText = i18nService.t('mediaPollingCount').replace('{count}', String(pollCount));
+  const statusQueryText = i18nService.t('mediaStatusQueryCount').replace('{count}', String(pollCount));
+
+  useEffect(() => {
+    if (!cancelError) return;
+    const timer = setTimeout(() => setCancelError(null), 3000);
+    return () => clearTimeout(timer);
+  }, [cancelError]);
+
+  const handleCancel = async () => {
+    if (!group.taskId || cancelling) return;
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      const result = await window.electron.cowork.cancelMediaTask(group.taskId);
+      if (!result.success) {
+        setCancelError(result.message || 'Cancel failed');
+      }
+    } catch {
+      setCancelError('Cancel failed');
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   return (
     <div className="relative py-1">
@@ -47,11 +78,22 @@ const MediaPollingIndicator: React.FC<{
           )}
         </span>
         <div className="flex-1 min-w-0 py-1">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-medium text-secondary">{label}</span>
-            <span className="text-xs text-muted">{pollCountText}</span>
+            <span className="text-xs text-muted break-all">taskid:{group.upstreamTaskId || group.taskId}  {statusQueryText}</span>
+            {canCancel && (
+              <button
+                className="px-2 py-0.5 text-xs rounded border border-red-300 text-red-500 hover:bg-red-50 dark:hover:bg-red-950 disabled:opacity-50"
+                onClick={handleCancel}
+                disabled={cancelling}
+              >
+                {cancelling ? '...' : i18nService.t('mediaTaskCancel') || 'Cancel'}
+              </button>
+            )}
+            {cancelError && (
+              <span className="text-xs text-red-500">{cancelError}</span>
+            )}
           </div>
-          <div className="text-xs text-muted mt-0.5">taskId: {group.taskId}</div>
         </div>
       </div>
     </div>

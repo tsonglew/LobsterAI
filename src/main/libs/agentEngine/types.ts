@@ -63,6 +63,8 @@ export type CoworkMediaSelection = {
   mode: 'auto' | 'image' | 'video' | 'none';
   modelId?: string;
   modelName?: string;
+  imageModelId?: string;
+  videoModelId?: string;
 };
 
 export type CoworkStartOptions = {

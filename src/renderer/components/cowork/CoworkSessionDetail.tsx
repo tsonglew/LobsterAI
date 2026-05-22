@@ -4,12 +4,14 @@ import {
   DocumentArrowDownIcon,
   PhotoIcon,
 } from '@heroicons/react/24/outline';
+import Lottie from 'lottie-react';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useDispatch, useSelector } from 'react-redux';
 
 import { getScheduledReminderDisplayText } from '../../../scheduledTask/reminderText';
-import { normalizeFilePathForDedup, parseFileLinksFromMessage, parseFilePathsFromText, parseMediaTokensFromText, parseRemoteImageArtifactsFromText, parseToolArtifact, parseToolResultMediaArtifacts, stripFileLinksFromText } from '../../services/artifactParser';
+import mediaGeneratingAnimation from '../../assets/lottie/media-generating.json';
+import { dedupeArtifactsForDisplay, hasToolResultMediaAssets, normalizeFilePathForDedup, parseFileLinksFromMessage, parseFilePathsFromText, parseMediaTokensFromText, parseRemoteImageArtifactsFromText, parseToolArtifact, parseToolResultMediaArtifacts, stripFileLinksFromText } from '../../services/artifactParser';
 import { coworkService } from '../../services/cowork';
 import { i18nService } from '../../services/i18n';
 import { RootState } from '../../store';
@@ -429,7 +431,80 @@ const getToolInputString = (
 const truncatePreview = (value: string, maxLength = 120): string =>
   value.length <= maxLength ? value : `${value.slice(0, maxLength - 3)}...`;
 
-const MEDIA_TOKEN_DISPLAY_RE = /\n?MEDIA:\s*`?[^`\n]+?`?\s*$/gim;
+const MEDIA_TOKEN_DISPLAY_RE = /\n?MEDIA(?::\s*`?[^`\n]+?`?)?\s*$/gim;
+const MEDIA_TOKEN_MARKER_RE = /(^|\n)\s*MEDIA(?::\s*`?[^`\n]+?`?)?\s*$/im;
+const MEDIA_FILE_LINK_DISPLAY_RE = /\[([^\]]+)\]\((file:\/\/[^)]*\.(?:png|jpe?g|gif|webp|bmp|avif|mp4|webm|mov)(?:\?[^)]*)?)\)/gi;
+const SAVED_GENERATED_MEDIA_RE = /^Saved generated (?:video|image)s?:/i;
+const GENERATED_MEDIA_SUCCEEDED_RE = /^(?:Video|Image) generation succeeded\./i;
+
+const stripMediaDisplayTokens = (value: string): string =>
+  value.replace(MEDIA_TOKEN_DISPLAY_RE, '').trimEnd();
+
+const getDisplayPathFromFileUrl = (url: string): string => {
+  let filePath = url.trim();
+  if (filePath.startsWith('file:///')) {
+    filePath = filePath.slice(7);
+  } else if (filePath.startsWith('file://')) {
+    filePath = filePath.slice(7);
+  } else if (filePath.startsWith('file:/')) {
+    filePath = filePath.slice(5);
+  }
+  const queryIndex = filePath.search(/[?#]/);
+  if (queryIndex >= 0) {
+    filePath = filePath.slice(0, queryIndex);
+  }
+  try {
+    filePath = decodeURIComponent(filePath);
+  } catch {
+    // Keep the original path if it contains a literal percent sign.
+  }
+  if (/^\/[A-Za-z]:/.test(filePath)) {
+    filePath = filePath.slice(1);
+  }
+  return filePath.replace(/\\/g, '/');
+};
+
+const stripMediaFileLinksForDisplay = (value: string): string =>
+  value
+    .replace(MEDIA_FILE_LINK_DISPLAY_RE, (_match, _label: string, url: string) => getDisplayPathFromFileUrl(url))
+    .replace(/([:：])\s*\n\s*((?:\/|[A-Za-z]:\/)[^\n]+\.(?:png|jpe?g|gif|webp|bmp|avif|mp4|webm|mov))/gi, '$1 $2')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trimEnd();
+
+const getAssistantMessageDisplayText = (content: string): string =>
+  stripMediaDisplayTokens(stripMediaFileLinksForDisplay(content));
+
+const getAssistantMediaCompletionKey = (message: CoworkMessage): string | null => {
+  const rawContent = message.content || '';
+  MEDIA_FILE_LINK_DISPLAY_RE.lastIndex = 0;
+  const hasMediaFileLink = MEDIA_FILE_LINK_DISPLAY_RE.test(rawContent);
+  MEDIA_FILE_LINK_DISPLAY_RE.lastIndex = 0;
+  if (!MEDIA_TOKEN_MARKER_RE.test(rawContent) && !hasMediaFileLink) {
+    return null;
+  }
+  const displayText = getAssistantMessageDisplayText(rawContent).trim();
+  if (!displayText) return null;
+  return displayText.replace(/\s+/g, ' ').toLowerCase();
+};
+
+const getMediaCompletionDisplayText = (
+  message: CoworkMessage,
+  content: string,
+): string | null => {
+  if (!hasToolResultMediaAssets(message)) return null;
+  const trimmed = content.trim();
+  const details = message.metadata?.toolResultDetails as Record<string, unknown> | undefined;
+  const status = typeof details?.status === 'string' ? details.status.trim().toLowerCase() : '';
+  if (
+    !SAVED_GENERATED_MEDIA_RE.test(trimmed) &&
+    !GENERATED_MEDIA_SUCCEEDED_RE.test(trimmed) &&
+    status !== 'succeeded'
+  ) {
+    return null;
+  }
+  return i18nService.t('mediaGenerationComplete');
+};
 
 const normalizeToolResultText = (value: string): string => {
   const withoutAnsi = value.replace(ANSI_ESCAPE_PATTERN, '');
@@ -622,9 +697,13 @@ const hasText = (value: unknown): value is string =>
 
 const getToolResultDisplay = (message: CoworkMessage): string => {
   if (hasText(message.content)) {
+    const mediaCompletionText = getMediaCompletionDisplayText(message, message.content);
+    if (mediaCompletionText) return mediaCompletionText;
     return formatStructuredText(normalizeToolResultText(message.content));
   }
   if (hasText(message.metadata?.toolResult)) {
+    const mediaCompletionText = getMediaCompletionDisplayText(message, message.metadata.toolResult ?? '');
+    if (mediaCompletionText) return mediaCompletionText;
     return formatStructuredText(normalizeToolResultText(message.metadata?.toolResult ?? ''));
   }
   if (hasText(message.metadata?.error)) {
@@ -715,6 +794,7 @@ export type ToolGroupItem = {
   type: 'tool_group';
   toolUse: CoworkMessage;
   toolResult?: CoworkMessage | null;
+  mediaPollOrdinal?: number;
 };
 
 export type DisplayItem =
@@ -885,8 +965,24 @@ const isVisibleAssistantTurnItem = (item: AssistantTurnItem): boolean => {
   return true;
 };
 
-const getVisibleAssistantItems = (assistantItems: AssistantTurnItem[]): AssistantTurnItem[] =>
-  assistantItems.filter(isVisibleAssistantTurnItem);
+const getVisibleAssistantItems = (assistantItems: AssistantTurnItem[]): AssistantTurnItem[] => {
+  const seenMediaCompletionKeys = new Set<string>();
+  const visibleItems: AssistantTurnItem[] = [];
+
+  for (const item of assistantItems) {
+    if (!isVisibleAssistantTurnItem(item)) continue;
+    if (item.type === 'assistant') {
+      const key = getAssistantMediaCompletionKey(item.message);
+      if (key) {
+        if (seenMediaCompletionKeys.has(key)) continue;
+        seenMediaCompletionKeys.add(key);
+      }
+    }
+    visibleItems.push(item);
+  }
+
+  return visibleItems;
+};
 
 export const hasRenderableAssistantContent = (turn: ConversationTurn): boolean => (
   getVisibleAssistantItems(turn.assistantItems).length > 0
@@ -896,19 +992,111 @@ const isMediaStatusPoll = (group: ToolGroupItem): boolean => {
   const toolName = group.toolUse.metadata?.toolName;
   if (!toolName) return false;
   const normalized = normalizeToolName(toolName);
-  if (normalized !== 'lobstervideogenerate' && normalized !== 'lobsteraiimagegenerate') return false;
+  if (normalized !== 'lobsteraivideogenerate' && normalized !== 'lobsteraiimagegenerate') return false;
   const input = group.toolUse.metadata?.toolInput as Record<string, unknown> | undefined;
   return input?.action === 'status' && typeof input?.taskId === 'string';
 };
+
+const getMediaStatusDetails = (group: ToolGroupItem): Record<string, unknown> | undefined => {
+  const liveDetails = group.toolUse.metadata?.mediaStatusDetails as Record<string, unknown> | undefined;
+  const resultDetails = group.toolResult?.metadata?.toolResultDetails as Record<string, unknown> | undefined;
+  if (!liveDetails) return resultDetails;
+  if (!resultDetails) return liveDetails;
+  const livePollCount = typeof liveDetails.pollCount === 'number' ? liveDetails.pollCount : undefined;
+  const resultPollCount = typeof resultDetails.pollCount === 'number' ? resultDetails.pollCount : undefined;
+  const pollCount = livePollCount == null
+    ? resultPollCount
+    : resultPollCount == null
+      ? livePollCount
+      : Math.max(livePollCount, resultPollCount);
+  return {
+    ...liveDetails,
+    ...resultDetails,
+    ...(pollCount != null ? { pollCount } : {}),
+  };
+};
+
+const readMediaPollCount = (value: unknown): number | undefined => (
+  typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined
+);
+
+const getMediaStatusDetailPollCount = (group: ToolGroupItem): number | undefined => {
+  const details = getMediaStatusDetails(group);
+  return readMediaPollCount(details?.pollCount);
+};
+
+const getMediaPollCount = (group: ToolGroupItem): number | undefined => {
+  const detailPollCount = getMediaStatusDetailPollCount(group);
+  if (detailPollCount == null) return group.mediaPollOrdinal;
+  if (group.mediaPollOrdinal == null) return detailPollCount;
+  return Math.max(detailPollCount, group.mediaPollOrdinal);
+};
+
+const isMediaGenerateRunning = (group: ToolGroupItem): boolean => {
+  const toolName = group.toolUse.metadata?.toolName;
+  if (!toolName) return false;
+  const normalized = normalizeToolName(toolName);
+  if (normalized !== 'lobsteraivideogenerate') return false;
+  const input = group.toolUse.metadata?.toolInput as Record<string, unknown> | undefined;
+  const action = input?.action;
+  if (action !== 'generate' && action !== undefined) return false;
+  if (!group.toolResult) return true;
+  const meta = group.toolResult.metadata;
+  if (meta?.isStreaming && !meta?.isFinal) return true;
+  return false;
+};
+
+const isMediaStatusPollRunning = (group: ToolGroupItem): boolean => {
+  if (!isMediaStatusPoll(group)) return false;
+  if (!group.toolResult) return true;
+  const meta = group.toolResult.metadata;
+  if (meta?.isStreaming && !meta?.isFinal) return true;
+  return false;
+};
+
+const parseMediaStreamingInfo = (group: ToolGroupItem): { taskId?: string; upstreamTaskId?: string; pollCount?: number } => {
+  const result = group.toolResult;
+  const input = group.toolUse.metadata?.toolInput as Record<string, unknown> | undefined;
+  const inputTaskId = typeof input?.taskId === 'string' && input.taskId.trim()
+    ? input.taskId.trim()
+    : undefined;
+  const statusFallbackPollCount = input?.action === 'status' ? (group.mediaPollOrdinal ?? 1) : undefined;
+  const details = getMediaStatusDetails(group);
+  if (details?.taskId || inputTaskId) {
+    return {
+      taskId: details?.taskId ? String(details.taskId) : inputTaskId,
+      upstreamTaskId: details?.upstreamTaskId ? String(details.upstreamTaskId) : undefined,
+      pollCount: getMediaPollCount(group) ?? statusFallbackPollCount,
+    };
+  }
+  if (!result) return inputTaskId ? { taskId: inputTaskId, pollCount: statusFallbackPollCount } : {};
+  return {};
+};
+
 
 const TERMINAL_MEDIA_STATUSES = new Set(['succeeded', 'failed', 'timeout', 'cancelled']);
 
 const extractMediaPollStatus = (poll: ToolGroupItem): string | null => {
   const result = poll.toolResult;
+  const details = getMediaStatusDetails(poll);
+  if (typeof details?.status === 'string' && details.status.trim()) {
+    return details.status.trim();
+  }
   if (!result) return null;
   const text = result.content || (result.metadata?.toolResult as string) || '';
   const match = text.match(/^Status:\s*(\S+)/m);
   return match ? match[1] : null;
+};
+
+const extractUpstreamTaskId = (poll: ToolGroupItem): string | undefined => {
+  const details = getMediaStatusDetails(poll);
+  return details?.upstreamTaskId ? String(details.upstreamTaskId) : undefined;
+};
+
+const extractMediaPollCount = (poll: ToolGroupItem): number | undefined => {
+  return getMediaPollCount(poll);
 };
 
 export type ConsolidatedItem = AssistantTurnItem | { type: 'media_polling_group'; group: MediaPollingGroup };
@@ -916,6 +1104,7 @@ export type ConsolidatedItem = AssistantTurnItem | { type: 'media_polling_group'
 const consolidateMediaPolling = (items: AssistantTurnItem[]): ConsolidatedItem[] => {
   // Pass 1: collect all status poll indices grouped by taskId
   const pollsByTaskId = new Map<string, { toolName: string; indices: number[] }>();
+  const mediaPollOrdinals = new Map<number, number>();
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     if (item.type === 'tool_group' && isMediaStatusPoll(item.group)) {
@@ -931,6 +1120,21 @@ const consolidateMediaPolling = (items: AssistantTurnItem[]): ConsolidatedItem[]
     }
   }
 
+  for (const { indices } of pollsByTaskId.values()) {
+    let cumulativePollCount = 0;
+    for (const itemIndex of indices) {
+      const group = (items[itemIndex] as { type: 'tool_group'; group: ToolGroupItem }).group;
+      const detailPollCount = getMediaStatusDetailPollCount(group);
+      const nextPollCount = detailPollCount == null
+        ? cumulativePollCount + 1
+        : detailPollCount > cumulativePollCount
+          ? detailPollCount
+          : cumulativePollCount + detailPollCount;
+      cumulativePollCount = Math.max(cumulativePollCount, nextPollCount);
+      mediaPollOrdinals.set(itemIndex, cumulativePollCount);
+    }
+  }
+
   // For taskIds with only 1 poll, no consolidation needed
   const skipIndices = new Set<number>();
   const insertAfterIndex = new Map<number, MediaPollingGroup>();
@@ -941,7 +1145,11 @@ const consolidateMediaPolling = (items: AssistantTurnItem[]): ConsolidatedItem[]
     const consolidatedPolls: ToolGroupItem[] = [];
     for (let k = 1; k < indices.length; k++) {
       skipIndices.add(indices[k]);
-      consolidatedPolls.push((items[indices[k]] as { type: 'tool_group'; group: ToolGroupItem }).group);
+      const group = (items[indices[k]] as { type: 'tool_group'; group: ToolGroupItem }).group;
+      consolidatedPolls.push({
+        ...group,
+        mediaPollOrdinal: mediaPollOrdinals.get(indices[k]),
+      });
     }
     const lastIndex = indices[indices.length - 1];
     const lastPoll = consolidatedPolls[consolidatedPolls.length - 1];
@@ -960,6 +1168,15 @@ const consolidateMediaPolling = (items: AssistantTurnItem[]): ConsolidatedItem[]
             isComplete = true;
             break;
           }
+          const details = item.message.metadata?.toolResultDetails as Record<string, unknown> | undefined;
+          if (details?.status && TERMINAL_MEDIA_STATUSES.has(details.status as string)) {
+            isComplete = true;
+            break;
+          }
+          if (/^Saved generated (video|image)s?:/m.test(item.message.content)) {
+            isComplete = true;
+            break;
+          }
         }
       }
     }
@@ -967,6 +1184,9 @@ const consolidateMediaPolling = (items: AssistantTurnItem[]): ConsolidatedItem[]
       type: 'media_polling_group',
       toolName,
       taskId,
+      upstreamTaskId: extractUpstreamTaskId(lastPoll),
+      lastStatus,
+      pollCount: extractMediaPollCount(lastPoll) ?? indices.length,
       polls: consolidatedPolls,
       isComplete,
     });
@@ -976,7 +1196,19 @@ const consolidateMediaPolling = (items: AssistantTurnItem[]): ConsolidatedItem[]
   const result: ConsolidatedItem[] = [];
   for (let i = 0; i < items.length; i++) {
     if (!skipIndices.has(i)) {
-      result.push(items[i]);
+      const item = items[i];
+      const mediaPollOrdinal = mediaPollOrdinals.get(i);
+      if (item.type === 'tool_group' && mediaPollOrdinal != null) {
+        result.push({
+          ...item,
+          group: {
+            ...item.group,
+            mediaPollOrdinal,
+          },
+        });
+      } else {
+        result.push(item);
+      }
     }
     const group = insertAfterIndex.get(i);
     if (group) {
@@ -1041,7 +1273,10 @@ const ToolCallGroup: React.FC<{
   mapDisplayText,
 }) => {
   const { toolUse, toolResult } = group;
+  const shouldExpandByDefault = isMediaStatusPoll(group);
+  const isSessionStreaming = useSelector(selectIsStreaming);
   const rawToolName = typeof toolUse.metadata?.toolName === 'string' ? toolUse.metadata.toolName : 'Tool';
+
   const toolName = getToolDisplayName(rawToolName);
   const toolInput = toolUse.metadata?.toolInput;
   const isCronTool = isCronToolName(rawToolName);
@@ -1059,7 +1294,7 @@ const ToolCallGroup: React.FC<{
   const showNoDetailError = isToolError && !hasToolResultText;
   const toolResultFallback = showNoDetailError ? i18nService.t('coworkToolNoErrorDetail') : '';
   const displayToolResult = hasToolResultText ? toolResultDisplay : toolResultFallback;
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(shouldExpandByDefault);
   const resultLineCount = hasToolResultText ? getToolResultLineCount(toolResultDisplay) : 0;
   const toolResultSummary = isCronTool && hasToolResultText
     ? truncatePreview(toolResultDisplay.replace(/\s+/g, ' '))
@@ -1086,11 +1321,13 @@ const ToolCallGroup: React.FC<{
         className="w-full flex items-start gap-2 text-left group relative z-10"
       >
         <span className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${
-          !toolResult
+          !toolResult && isSessionStreaming
             ? 'bg-blue-500 animate-pulse'
-            : isToolError
-              ? 'bg-red-500'
-              : 'bg-green-500'
+            : !toolResult
+              ? 'bg-blue-500'
+              : isToolError
+                ? 'bg-red-500'
+                : 'bg-green-500'
         }`} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
@@ -1116,13 +1353,64 @@ const ToolCallGroup: React.FC<{
                 : toolResultFallback}
             </div>
           )}
-          {!toolResult && (
+          {!toolResult && isSessionStreaming && (
             <div className="text-xs text-muted mt-0.5">
               {i18nService.t('coworkToolRunning')}
             </div>
           )}
         </div>
       </button>
+      {isMediaGenerateRunning(group) && isSessionStreaming && (() => {
+        const streamingInfo = parseMediaStreamingInfo(group);
+        return (
+          <div className="ml-4 mt-2 flex items-center gap-2">
+            <Lottie
+              animationData={mediaGeneratingAnimation}
+              loop
+              autoplay
+              style={{ width: 36, height: 36 }}
+            />
+            <span className="text-sm font-medium text-secondary">
+              {i18nService.t('mediaGeneratingVideo')}
+            </span>
+            {streamingInfo.taskId && (
+              <span className="text-xs text-muted break-all">taskid:{streamingInfo.upstreamTaskId || streamingInfo.taskId}</span>
+            )}
+            {streamingInfo.pollCount != null && (
+              <span className="text-xs text-muted">
+                {i18nService.t('mediaStatusQueryCount').replace('{count}', String(streamingInfo.pollCount))}
+              </span>
+            )}
+          </div>
+        );
+      })()}
+      {isMediaStatusPollRunning(group) && isSessionStreaming && (() => {
+        const streamingInfo = parseMediaStreamingInfo(group);
+        const displayTaskId = streamingInfo.upstreamTaskId || streamingInfo.taskId;
+        const toolName = group.toolUse.metadata?.toolName || '';
+        const isVideo = normalizeToolName(toolName) === 'lobsteraivideogenerate';
+        return (
+          <div className="ml-4 mt-2 flex items-center gap-2 flex-wrap">
+            <Lottie
+              animationData={mediaGeneratingAnimation}
+              loop
+              autoplay
+              style={{ width: 36, height: 36 }}
+            />
+            <span className="text-sm font-medium text-secondary">
+              {i18nService.t(isVideo ? 'mediaGeneratingVideo' : 'mediaGeneratingImage')}
+            </span>
+            {displayTaskId && (
+              <span className="text-xs text-muted break-all">taskid:{displayTaskId}</span>
+            )}
+            {streamingInfo.pollCount != null && (
+              <span className="text-xs text-muted">
+                {i18nService.t('mediaStatusQueryCount').replace('{count}', String(streamingInfo.pollCount))}
+              </span>
+            )}
+          </div>
+        );
+      })()}
       {isExpanded && (
         <div className="ml-4 mt-2">
           {isBashTool ? (
@@ -1489,7 +1777,7 @@ const AssistantMessageItem: React.FC<{
   const [isHovered, setIsHovered] = useState(false);
   const [expandedImage, setExpandedImage] = useState<ImagePreviewSource | null>(null);
   const rawContent = mapDisplayText ? mapDisplayText(message.content) : message.content;
-  const displayContent = rawContent.replace(MEDIA_TOKEN_DISPLAY_RE, '').trimEnd();
+  const displayContent = getAssistantMessageDisplayText(rawContent);
   const modelLabel = getMessageModelLabel(turnMetadata);
   const handleBlur = useCallback((event: React.FocusEvent<HTMLDivElement>) => {
     const nextTarget = event.relatedTarget;
@@ -1665,7 +1953,9 @@ export const AssistantTurnBlock: React.FC<{
     const rawContent = hasText(message.content)
       ? message.content
       : (typeof message.metadata?.error === 'string' ? message.metadata.error : '');
-    const normalizedContent = getScheduledReminderDisplayText(rawContent) ?? rawContent;
+    const normalizedContent = getMediaCompletionDisplayText(message, rawContent)
+      ?? getScheduledReminderDisplayText(rawContent)
+      ?? rawContent;
     const content = mapDisplayText ? mapDisplayText(normalizedContent) : normalizedContent;
     if (!content.trim()) return null;
 
@@ -2099,6 +2389,13 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       const messages = currentSession.messages;
       const detected: Artifact[] = [];
       const seenFilePaths = new Set<string>();
+      const rememberArtifactFilePaths = (artifacts: Artifact[]) => {
+        for (const artifact of artifacts) {
+          if (artifact.filePath) {
+            seenFilePaths.add(normalizeFilePathForDedup(artifact.filePath));
+          }
+        }
+      };
 
       for (const msg of messages) {
         if (msg.type === 'assistant' && !msg.metadata?.isThinking && msg.content) {
@@ -2124,7 +2421,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           detected.push(...parseRemoteImageArtifactsFromText(msg.content, msg.id, sessionId, 'artifact-remote-assistant'));
         }
 
-        if (msg.type === 'tool_result' && msg.content) {
+        if (msg.type === 'tool_result') {
+          const toolMediaArtifacts = parseToolResultMediaArtifacts(msg, sessionId);
+          if (toolMediaArtifacts.length > 0) {
+            detected.push(...toolMediaArtifacts);
+            rememberArtifactFilePaths(toolMediaArtifacts);
+            continue;
+          }
+
+          if (!msg.content) continue;
+
           const mediaArtifacts = parseMediaTokensFromText(msg.content, msg.id, sessionId);
           for (const ma of mediaArtifacts) {
             const normalized = ma.filePath ? normalizeFilePathForDedup(ma.filePath) : '';
@@ -2142,10 +2448,18 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             }
           }
           detected.push(...parseRemoteImageArtifactsFromText(msg.content, msg.id, sessionId, 'artifact-remote-toolresult'));
-          detected.push(...parseToolResultMediaArtifacts(msg, sessionId));
         }
 
-        if (msg.type === 'system' && msg.content) {
+        if (msg.type === 'system') {
+          const toolMediaArtifacts = parseToolResultMediaArtifacts(msg, sessionId);
+          if (toolMediaArtifacts.length > 0) {
+            detected.push(...toolMediaArtifacts);
+            rememberArtifactFilePaths(toolMediaArtifacts);
+            continue;
+          }
+
+          if (!msg.content) continue;
+
           const fileLinks = parseFileLinksFromMessage(msg.content, msg.id, sessionId);
           for (const fl of fileLinks) {
             const normalized = fl.filePath ? normalizeFilePathForDedup(fl.filePath) : '';
@@ -2166,7 +2480,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           }
 
           detected.push(...parseRemoteImageArtifactsFromText(msg.content, msg.id, sessionId, 'artifact-remote-system'));
-          detected.push(...parseToolResultMediaArtifacts(msg, sessionId));
         }
       }
 
@@ -2210,6 +2523,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             ? rawPath
             : (/^[A-Za-z]:/.test(rawPath) ? rawPath : `${cwd}/${rawPath}`);
           try {
+            // Video files are loaded directly via localfile:// protocol in the renderer,
+            // so skip reading the full file into a data URL to avoid memory pressure.
+            if (artifact.type === 'video') {
+              loadedFileIdsRef.current.add(artifact.id);
+              dispatch(addArtifact({
+                sessionId,
+                artifact: { ...artifact, content: '', filePath: absPath },
+              }));
+              continue;
+            }
             const result = await window.electron.dialog.readFileAsDataUrl(absPath);
             if (result?.success && result.dataUrl) {
               const isTextType = artifact.type !== 'image' && artifact.type !== 'document';
@@ -2293,6 +2616,14 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             ? rawPath
             : (/^[A-Za-z]:/.test(rawPath) ? rawPath : `${cwd}/${rawPath}`);
           try {
+            if (artifact.type === 'video') {
+              loadedFileIdsRef.current.add(artifact.id);
+              dispatch(addArtifact({
+                sessionId,
+                artifact: { ...artifact, content: '', filePath: absPath },
+              }));
+              continue;
+            }
             const result = await window.electron.dialog.readFileAsDataUrl(absPath);
             if (result?.success && result.dataUrl) {
               const isTextType = artifact.type !== 'image' && artifact.type !== 'document';
@@ -2940,9 +3271,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           }
         }
       }
-      const turnArtifacts = sessionArtifacts.filter(
+      const turnArtifacts = dedupeArtifactsForDisplay(sessionArtifacts.filter(
         a => turnMessageIds.has(a.messageId) && PREVIEWABLE_ARTIFACT_TYPES.has(a.type)
-      );
+      ));
 
       return (
         <LazyRenderTurn key={turn.id} turnId={turn.id} alwaysRender={alwaysRender} data-turn-index={index}>

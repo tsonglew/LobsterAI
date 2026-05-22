@@ -1005,6 +1005,7 @@ type OpenClawConfigSyncDeps = {
   getIMSettings?: () => IMSettings | null;
   getResolvedMcpServers?: () => ResolvedMcpServer[];
   getAskUserCallbackUrl?: () => string | null;
+  getMediaCallbackUrl?: () => string | null;
   getMcpBridgeSecret?: () => string;
   getSkillsList?: () => Array<{ id: string; enabled: boolean }>;
   getAgents?: () => Agent[];
@@ -1031,6 +1032,7 @@ export class OpenClawConfigSync {
   private readonly getIMSettings?: () => IMSettings | null;
   private readonly getResolvedMcpServers?: () => ResolvedMcpServer[];
   private readonly getAskUserCallbackUrl?: () => string | null;
+  private readonly getMediaCallbackUrl?: () => string | null;
   private readonly getMcpBridgeSecret?: () => string;
   private readonly getSkillsList?: () => Array<{ id: string; enabled: boolean }>;
   private readonly getAgents?: () => Agent[];
@@ -1058,6 +1060,7 @@ export class OpenClawConfigSync {
     this.getIMSettings = deps.getIMSettings;
     this.getResolvedMcpServers = deps.getResolvedMcpServers;
     this.getAskUserCallbackUrl = deps.getAskUserCallbackUrl;
+    this.getMediaCallbackUrl = deps.getMediaCallbackUrl;
     this.getMcpBridgeSecret = deps.getMcpBridgeSecret;
     this.getSkillsList = deps.getSkillsList;
     this.getAgents = deps.getAgents;
@@ -1554,24 +1557,24 @@ export class OpenClawConfigSync {
     if (hasAskUserPlugin && askUserCallbackUrl && managedConfig.plugins) {
       const plugins = managedConfig.plugins as Record<string, unknown>;
       const entries = plugins.entries as Record<string, Record<string, unknown>>;
-      entries['lobster-media-generation'] = {
+      entries['ask-user-question'] = {
         enabled: true,
         config: {
           callbackUrl: askUserCallbackUrl,
           secret: '${LOBSTER_MCP_BRIDGE_SECRET}',
-          requestTimeoutMs: 120000,
         },
       };
     }
 
     // Sync LobsterMediaGeneration plugin config — uses media callback endpoint
-    if (hasMediaGenPlugin && isSubscribed && mcpBridgeCfg && managedConfig.plugins) {
+    const mediaCallbackUrl = this.getMediaCallbackUrl?.();
+    if (hasMediaGenPlugin && isSubscribed && mediaCallbackUrl && managedConfig.plugins) {
       const plugins = managedConfig.plugins as Record<string, unknown>;
       const entries = plugins.entries as Record<string, Record<string, unknown>>;
       entries['lobster-media-generation'] = {
         enabled: true,
         config: {
-          callbackUrl: mcpBridgeCfg.mediaCallbackUrl,
+          callbackUrl: mediaCallbackUrl,
           secret: '${LOBSTER_MCP_BRIDGE_SECRET}',
           requestTimeoutMs: 120000,
         },

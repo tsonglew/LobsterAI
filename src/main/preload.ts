@@ -4,6 +4,7 @@ import { IpcChannel as ScheduledTaskIpc } from '../scheduledTask/constants';
 import { AgentIpcChannel } from '../shared/agent/constants';
 import { AppUpdateIpc } from '../shared/appUpdate/constants';
 import { ArtifactPreviewIpc } from '../shared/artifactPreview/constants';
+import { CoworkIpcChannel } from '../shared/cowork/constants';
 import type { Platform } from '../shared/platform';
 import { NimQrLoginIpc } from './ipcHandlers/nimQrLogin';
 import { OpenClawSessionIpc } from './openclawSession/constants';
@@ -255,6 +256,10 @@ contextBridge.exposeInMainWorld('electron', {
       fileExtension?: string;
     }) => ipcRenderer.invoke('cowork:session:exportText', options),
 
+    // Media task management
+    cancelMediaTask: (taskId: string) =>
+      ipcRenderer.invoke('cowork:media:cancel', taskId),
+
     // Permission handling
     respondToPermission: (options: { requestId: string; result: any }) =>
       ipcRenderer.invoke('cowork:permission:respond', options),
@@ -314,6 +319,11 @@ contextBridge.exposeInMainWorld('electron', {
       const handler = (_event: any, data: { sessionId: string; messageId: string; content: string; metadata?: Record<string, unknown> }) => callback(data);
       ipcRenderer.on('cowork:stream:messageUpdate', handler);
       return () => ipcRenderer.removeListener('cowork:stream:messageUpdate', handler);
+    },
+    onMediaStatusPollUpdate: (callback: (data: { sessionId: string; toolCallId: string; details: Record<string, unknown> }) => void) => {
+      const handler = (_event: any, data: { sessionId: string; toolCallId: string; details: Record<string, unknown> }) => callback(data);
+      ipcRenderer.on(CoworkIpcChannel.MediaStatusPollUpdate, handler);
+      return () => ipcRenderer.removeListener(CoworkIpcChannel.MediaStatusPollUpdate, handler);
     },
     onStreamSessionStatus: (callback: (data: { sessionId: string; status: string }) => void) => {
       const handler = (_event: any, data: { sessionId: string; status: string }) => callback(data);

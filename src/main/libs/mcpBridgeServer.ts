@@ -8,6 +8,8 @@ import crypto from 'crypto';
 import http from 'http';
 import net from 'net';
 
+import { serializeForLog } from './sanitizeForLog';
+
 const log = (level: string, msg: string) => {
   const formatted = `[AskUser:HTTP][${level}] ${msg}`;
   if (level === 'ERROR') {
@@ -293,7 +295,7 @@ export class McpBridgeServer {
       }
 
       const result = await this.onMediaGenerationCallback(request);
-      const contentPreview = serializeToolContentForLog(result.content);
+      const contentPreview = serializeForLog(result.content);
       log('INFO', `Media generation completed for tool="${request.tool}" in ${Date.now() - t0}ms with isError=${result.isError ?? false}. Details=${serializeForLog(result.details ?? {})} Result=${contentPreview}`);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));

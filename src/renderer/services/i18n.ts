@@ -361,6 +361,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     artifactTypeHtml: '网站',
     artifactTypeSvg: 'SVG 图形',
     artifactTypeImage: '图片',
+    artifactTypeVideo: '视频',
     artifactTypeMermaid: 'Mermaid 图表',
     artifactTypeReact: 'React 组件',
     artifactTypeMarkdown: 'Markdown 文档',
@@ -370,6 +371,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     artifactOpenInFolder: '在文件夹中打开',
     artifactDocumentLoading: '正在加载文档...',
     artifactDocumentError: '文档加载失败',
+    artifactVideoLoading: '正在加载视频...',
+    artifactVideoError: '视频加载失败',
     artifactSheetTab: '工作表',
     artifactShowingRows: '显示 {shown} / {total} 行',
     artifactRowCount: '行',
@@ -950,6 +953,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     mediaGeneratingImage: '图片生成中...',
     mediaGenerationComplete: '生成完成',
     mediaPollingCount: '已查询 {count} 次',
+    mediaTaskCancel: '取消',
+    mediaStatusQueryCount: '状态查询第{count}次',
 
     // Skills
     skills: '技能',
@@ -2319,6 +2324,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     artifactTypeHtml: 'Website',
     artifactTypeSvg: 'SVG Image',
     artifactTypeImage: 'Image',
+    artifactTypeVideo: 'Video',
     artifactTypeMermaid: 'Mermaid Diagram',
     artifactTypeReact: 'React Component',
     artifactTypeMarkdown: 'Markdown Document',
@@ -2328,6 +2334,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     artifactOpenInFolder: 'Reveal in Folder',
     artifactDocumentLoading: 'Loading document...',
     artifactDocumentError: 'Failed to load document',
+    artifactVideoLoading: 'Loading video...',
+    artifactVideoError: 'Failed to load video',
     artifactSheetTab: 'Sheet',
     artifactShowingRows: 'Showing {shown} of {total} rows',
     artifactRowCount: 'rows',
@@ -2937,6 +2945,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     mediaGeneratingImage: 'Generating image...',
     mediaGenerationComplete: 'Generation complete',
     mediaPollingCount: 'Checked {count} times',
+    mediaTaskCancel: 'Cancel',
+    mediaStatusQueryCount: 'Status query #{count}',
 
     // Skills
     skills: 'Skills',

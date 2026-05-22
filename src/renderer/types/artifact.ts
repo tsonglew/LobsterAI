@@ -1,6 +1,7 @@
-export type ArtifactType = 'html' | 'svg' | 'image' | 'mermaid' | 'code' | 'markdown' | 'text' | 'document';
+export type ArtifactType = 'html' | 'svg' | 'image' | 'video' | 'mermaid' | 'code' | 'markdown' | 'text' | 'document';
+export type ArtifactSource = 'inline' | 'tool' | 'file';
 
-export const PREVIEWABLE_ARTIFACT_TYPES = new Set<ArtifactType>(['html', 'svg', 'mermaid', 'image', 'markdown', 'text', 'document']);
+export const PREVIEWABLE_ARTIFACT_TYPES = new Set<ArtifactType>(['html', 'svg', 'mermaid', 'image', 'video', 'markdown', 'text', 'document']);
 
 export interface Artifact {
   id: string;
@@ -13,7 +14,7 @@ export interface Artifact {
   fileName?: string;
   filePath?: string;
   remoteUrl?: string;
-  source: ArtifactSource;
+  source?: ArtifactSource;
   createdAt: number;
 }
 
