@@ -1476,9 +1476,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
     || embeddingRemoteBaseUrl !== (coworkConfig.embeddingRemoteBaseUrl ?? '')
     || embeddingRemoteApiKey !== (coworkConfig.embeddingRemoteApiKey ?? '')
     || dreamingEnabled !== (coworkConfig.dreamingEnabled ?? false)
-    || dreamingFrequency !== (coworkConfig.dreamingFrequency ?? '0 3 * * *')
-    || dreamingModel !== (coworkConfig.dreamingModel ?? '')
-    || dreamingTimezone !== (coworkConfig.dreamingTimezone ?? '');
+    || dreamingFrequency !== (coworkConfig.dreamingFrequency ?? '0 3 * * *');
   const isOpenClawAgentEngine = coworkAgentEngine === 'openclaw';
 
   const openClawProgressPercent = useMemo(() => {
@@ -3098,12 +3096,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
             <DreamingSettingsSection
               dreamingEnabled={dreamingEnabled}
               dreamingFrequency={dreamingFrequency}
-              dreamingModel={dreamingModel}
-              dreamingTimezone={dreamingTimezone}
               onDreamingEnabledChange={setDreamingEnabled}
               onDreamingFrequencyChange={setDreamingFrequency}
-              onDreamingModelChange={setDreamingModel}
-              onDreamingTimezoneChange={setDreamingTimezone}
             />
           </div>
         );
