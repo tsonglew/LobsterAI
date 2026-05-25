@@ -1192,7 +1192,7 @@ export class OpenClawConfigSync {
     };
   }
 
-  private buildWebToolsConfig(browserWebAccess: BrowserWebAccessConfig): Record<string, unknown> {
+  private buildWebToolsConfig(browserWebAccess: BrowserWebAccessConfig, isSubscribed = false): Record<string, unknown> {
     const fetch = browserWebAccess.webFetch;
     const fetchConfig = {
       enabled: fetch.enabled,
@@ -1536,7 +1536,7 @@ export class OpenClawConfigSync {
       commands: {
         ownerAllowFrom: MANAGED_OWNER_ALLOW_FROM,
       },
-      tools: this.buildWebToolsConfig(browserWebAccess),
+      tools: this.buildWebToolsConfig(browserWebAccess, isSubscribed),
       browser: this.buildBrowserConfig(browserWebAccess),
       skills: {
         entries: {

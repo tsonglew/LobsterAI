@@ -8,19 +8,6 @@ import FileTypeIcon from '../icons/fileTypes/FileTypeIcon';
 
 const t = (key: string) => i18nService.t(key);
 
-const TYPE_ICONS: Record<ArtifactType, string> = {
-  html: '🌐',
-  svg: '🎨',
-  image: '🖼',
-  video: '🎬',
-  mermaid: '📊',
-  code: '📄',
-  markdown: '📝',
-  text: '📄',
-  document: '📑',
-  'local-service': '🌐',
-};
-
 const TYPE_ORDER: Record<ArtifactType, number> = {
   html: 0,
   svg: 1,
