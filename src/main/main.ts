@@ -43,13 +43,13 @@ import { pollNimQrLogin, startNimQrLogin } from './im/nimQrLoginService';
 import type { DingTalkInstanceConfig, DiscordInstanceConfig, EmailMultiInstanceConfig, FeishuInstanceConfig, NimInstanceConfig, Platform, QQInstanceConfig, TelegramInstanceConfig, WecomInstanceConfig } from './im/types';
 import { registerNimQrLoginHandlers } from './ipcHandlers/nimQrLogin';
 import { registerPluginHandlers } from './ipcHandlers/plugins';
-import { registerSkillHandlers } from './ipcHandlers/skills';
 import {
   getCronJobService,
   initCronJobServiceManager,
   initScheduledTaskHelpers,
   registerScheduledTaskHandlers,
 } from './ipcHandlers/scheduledTask';
+import { registerSkillHandlers } from './ipcHandlers/skills';
 import {
   type CoworkAgentEngine,
   CoworkEngineRouter,
