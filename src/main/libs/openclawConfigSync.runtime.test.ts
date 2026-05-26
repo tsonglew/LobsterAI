@@ -1168,6 +1168,28 @@ describe('OpenClawConfigSync runtime config output', () => {
     expect(agentsMd).toContain('For every `browser` tool call, set `target="host"` explicitly.');
   });
 
+  test('enables managed OpenClaw tool loop detection', async () => {
+    const sync = await createSync();
+
+    const result = sync.sync('tool-loop-detection');
+    expect(result.ok).toBe(true);
+
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(config.tools.loopDetection).toEqual({
+      enabled: true,
+      historySize: 40,
+      warningThreshold: 6,
+      unknownToolThreshold: 6,
+      criticalThreshold: 10,
+      globalCircuitBreakerThreshold: 16,
+      detectors: {
+        genericRepeat: true,
+        knownPollNoProgress: true,
+        pingPong: true,
+      },
+    });
+  });
+
   test('writes browser and web fetch access settings', async () => {
     const { setSystemProxyEnabled } = await import('./systemProxy');
     const {

@@ -195,6 +195,19 @@ const MANAGED_OWNER_ALLOW_FROM = [
 ];
 
 const MANAGED_TOOL_DENY = ['web_search'] as const;
+const MANAGED_TOOL_LOOP_DETECTION = {
+  enabled: true,
+  historySize: 40,
+  warningThreshold: 6,
+  unknownToolThreshold: 6,
+  criticalThreshold: 10,
+  globalCircuitBreakerThreshold: 16,
+  detectors: {
+    genericRepeat: true,
+    knownPollNoProgress: true,
+    pingPong: true,
+  },
+} as const;
 const EMAIL_PLUGIN_ID = 'email';
 const NIM_CHANNEL_PLUGIN_ID = 'nimsuite-openclaw-nim-channel';
 
@@ -1207,9 +1220,11 @@ export class OpenClawConfigSync {
     };
 
     return {
-      deny: [...MANAGED_TOOL_DENY,
-        ...(isSubscribed ? ['image_generate', 'video_generate'] : []),],
-      
+      deny: [
+        ...MANAGED_TOOL_DENY,
+        ...(isSubscribed ? ['image_generate', 'video_generate'] : []),
+      ],
+      loopDetection: MANAGED_TOOL_LOOP_DETECTION,
       web: {
         search: {
           enabled: false,
