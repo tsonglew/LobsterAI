@@ -5,6 +5,7 @@ import type { DraftAttachment } from '../../store/slices/coworkSlice';
 import FileTypeIcon from '../icons/fileTypes/FileTypeIcon';
 import { getFileTypeInfo, ImageFileIcon } from '../icons/fileTypes/index';
 import XMarkIcon from '../icons/XMarkIcon';
+import ImagePreviewModal, { type ImagePreviewSource } from './ImagePreviewModal';
 
 interface AttachmentCardProps {
   attachment: DraftAttachment;
@@ -30,6 +31,7 @@ const ImageCard: React.FC<AttachmentCardProps> = ({ attachment, onRemove, label 
   const [thumbUrl, setThumbUrl] = useState<string | null>(attachment.dataUrl ?? null);
   const [imgError, setImgError] = useState(false);
   const [loading, setLoading] = useState(!attachment.dataUrl);
+  const [preview, setPreview] = useState<ImagePreviewSource | null>(null);
 
   // If no dataUrl, try loading via IPC
   useEffect(() => {
@@ -78,8 +80,9 @@ const ImageCard: React.FC<AttachmentCardProps> = ({ attachment, onRemove, label 
         <img
           src={thumbUrl!}
           alt={attachment.name}
-          className="h-full w-full rounded-md border border-border object-cover shadow-subtle"
+          className="h-full w-full cursor-pointer rounded-md border border-border object-cover shadow-subtle"
           onError={() => setImgError(true)}
+          onClick={() => setPreview({ src: thumbUrl!, name: attachment.name, alt: attachment.name })}
           draggable={false}
         />
       )}
@@ -101,6 +104,8 @@ const ImageCard: React.FC<AttachmentCardProps> = ({ attachment, onRemove, label 
       >
         <XMarkIcon className="h-2.5 w-2.5" />
       </button>
+
+      <ImagePreviewModal image={preview} onClose={() => setPreview(null)} />
     </div>
   );
 };
