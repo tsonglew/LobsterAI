@@ -35,6 +35,18 @@ export const showShellFailureToast = (
   showToast(getShellFailureMessage(result, fallbackKey));
 };
 
+const logLocalFileActionFailure = (
+  operation: string,
+  filePath: string,
+  result: ShellActionResult | undefined | null,
+): void => {
+  console.warn(
+    `[LocalFileActions] failed to ${operation} local path because ${result?.reason || 'the shell request failed'}:`,
+    filePath,
+    result?.error,
+  );
+};
+
 export const openLocalPathWithToast = async (
   filePath: string,
   fallbackKey = 'openFileFailed',
@@ -42,9 +54,11 @@ export const openLocalPathWithToast = async (
   try {
     const result = await window.electron?.shell?.openPath(filePath);
     if (result?.success) return true;
+    logLocalFileActionFailure('open', filePath, result);
     showShellFailureToast(result, fallbackKey);
     return false;
-  } catch {
+  } catch (error) {
+    console.warn('[LocalFileActions] failed to open local path because the shell call threw:', filePath, error);
     showToast(i18nService.t(fallbackKey));
     return false;
   }
@@ -57,11 +71,12 @@ export const revealLocalPathWithToast = async (
   try {
     const result = await window.electron?.shell?.showItemInFolder(filePath);
     if (result?.success) return true;
+    logLocalFileActionFailure('reveal', filePath, result);
     showShellFailureToast(result, fallbackKey);
     return false;
-  } catch {
+  } catch (error) {
+    console.warn('[LocalFileActions] failed to reveal local path because the shell call threw:', filePath, error);
     showToast(i18nService.t(fallbackKey));
     return false;
   }
 };
-
