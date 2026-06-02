@@ -2417,7 +2417,7 @@ function buildCoworkUserSelectionMetadata(options: {
 
 function normalizeSelectedTextSnippetsForIpc(value: unknown): CoworkSelectedTextSnippet[] {
   const result = normalizeCoworkSelectedTextSnippets(value);
-  if (!result.success) {
+  if (result.success === false) {
     throw new Error(`Invalid selected text snippets: ${result.error}`);
   }
   return result.snippets;

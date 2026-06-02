@@ -722,7 +722,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       createdAt: Date.now(),
     };
     const result = normalizeCoworkSelectedTextSnippets([...selectedDraftSnippets, snippet]);
-    if (!result.success) {
+    if (result.success === false) {
       window.dispatchEvent(new CustomEvent('app:showToast', {
         detail: i18nService.t(SELECTED_TEXT_ERROR_I18N_KEYS[result.error]),
       }));
