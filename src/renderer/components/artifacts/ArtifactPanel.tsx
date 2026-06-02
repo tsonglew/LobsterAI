@@ -149,6 +149,26 @@ function getHtmlShareStatusLabel(status?: HtmlShareStatusValue): string {
   return t('htmlShareStatusLive');
 }
 
+function getHtmlShareResultStatusLabel(status?: HtmlShareStatusValue): string {
+  if (status === HtmlShareStatus.Disabled) return t('htmlShareResultStatusDisabled');
+  if (status === HtmlShareStatus.Failed) return t('htmlShareResultStatusFailed');
+  return '';
+}
+
+function getHtmlShareResultStatusClassName(status?: HtmlShareStatusValue): string {
+  if (status === HtmlShareStatus.Disabled) {
+    return 'bg-surface text-muted';
+  }
+  if (status === HtmlShareStatus.Failed) {
+    return 'bg-red-500/10 text-red-500 dark:text-red-400';
+  }
+  return '';
+}
+
+function shouldShowHtmlShareResultStatus(status?: HtmlShareStatusValue): boolean {
+  return status === HtmlShareStatus.Disabled || status === HtmlShareStatus.Failed;
+}
+
 function getHtmlShareFailureMessage(
   result:
     | {
@@ -1536,7 +1556,7 @@ const ArtifactPanel: React.FC<ArtifactPanelProps> = ({
               {htmlShareDialog.kind === HtmlShareDialogKind.Existing ? (
                 <div className="mt-3 space-y-3">
                   <div className="space-y-2">
-                    <div className="text-sm leading-6 text-secondary">
+                    <div className="whitespace-pre-wrap break-words text-sm leading-6 text-secondary">
                       {htmlShareDialog.message}
                     </div>
                     <div className="rounded-md border border-border bg-surface px-3 py-2">
@@ -1614,33 +1634,49 @@ const ArtifactPanel: React.FC<ArtifactPanelProps> = ({
                 </div>
               ) : (
                 <>
-                  <div className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-secondary">
-                    {htmlShareDialog.url || htmlShareDialog.message}
-                  </div>
-                  {htmlShareDialog.shareCode && (
-                    <div className="mt-2 rounded-md border border-border bg-surface px-3 py-2">
-                      <div className="text-xs text-muted">{t('htmlShareCode')}</div>
-                      <div className="mt-1 font-mono text-sm tracking-wider text-foreground">
-                        {htmlShareDialog.shareCode}
-                      </div>
-                    </div>
-                  )}
-                  {htmlShareDialog.shareCodeUnavailable && (
-                    <div className="mt-2 text-xs leading-5 text-muted">
-                      {t('htmlShareCodeUnavailable')}
-                    </div>
-                  )}
-                  {htmlShareDialog.status && (
-                    <div className="mt-2 text-xs leading-5 text-muted">
-                      {t('htmlShareCurrentStatus')}:{' '}
-                      {getHtmlShareStatusLabel(htmlShareDialog.status)}
-                    </div>
-                  )}
-                  {htmlShareDialog.url && htmlShareDialog.message !== htmlShareDialog.url && (
-                    <div className="mt-2 whitespace-pre-wrap break-words text-xs leading-5 text-muted">
+                  <div className="mt-3 space-y-3">
+                    <div className="whitespace-pre-wrap break-words text-sm leading-6 text-secondary">
                       {htmlShareDialog.message}
                     </div>
-                  )}
+                    {htmlShareDialog.url && (
+                      <div className="rounded-md border border-border bg-surface px-3 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-xs font-medium text-muted">
+                            {t('htmlShareLink')}
+                          </div>
+                          {shouldShowHtmlShareResultStatus(htmlShareDialog.status) && (
+                            <span
+                              className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${getHtmlShareResultStatusClassName(htmlShareDialog.status)}`}
+                            >
+                              {getHtmlShareResultStatusLabel(htmlShareDialog.status)}
+                            </span>
+                          )}
+                        </div>
+                        <div
+                          className="mt-1 truncate text-sm leading-5 text-foreground"
+                          title={htmlShareDialog.url}
+                        >
+                          {htmlShareDialog.url}
+                        </div>
+                      </div>
+                    )}
+                    {htmlShareDialog.shareCode && (
+                      <div className="rounded-md border border-border bg-surface px-3 py-2">
+                        <div className="text-xs font-medium text-muted">
+                          {t('htmlShareCode')}
+                        </div>
+                        <div className="mt-1 font-mono text-base font-semibold tracking-wider text-foreground">
+                          {htmlShareDialog.shareCode}
+                        </div>
+                      </div>
+                    )}
+                    {htmlShareDialog.shareCodeUnavailable &&
+                      htmlShareDialog.message !== t('htmlShareCodeUnavailable') && (
+                        <div className="text-xs leading-5 text-muted">
+                          {t('htmlShareCodeUnavailable')}
+                        </div>
+                      )}
+                  </div>
                 </>
               )}
               <div className="mt-4 flex flex-wrap justify-end gap-2">
@@ -1676,7 +1712,7 @@ const ArtifactPanel: React.FC<ArtifactPanelProps> = ({
                         className="rounded-md border border-border px-3 py-1.5 text-sm text-secondary transition-colors hover:bg-surface hover:text-foreground"
                       >
                         {htmlShareDialog.shareCode
-                          ? t('htmlShareCopyLinkAndCode')
+                          ? t('htmlShareCopyAll')
                           : t('htmlShareCopyLink')}
                       </button>
                     )}
@@ -1713,7 +1749,7 @@ const ArtifactPanel: React.FC<ArtifactPanelProps> = ({
                       className="rounded-md border border-border px-3 py-1.5 text-sm text-secondary transition-colors hover:bg-surface hover:text-foreground"
                     >
                       {htmlShareDialog.shareCode
-                        ? t('htmlShareCopyLinkAndCode')
+                        ? t('htmlShareCopyAll')
                         : t('htmlShareCopyLink')}
                     </button>
                     <button
