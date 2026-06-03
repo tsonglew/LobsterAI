@@ -34,6 +34,7 @@ import {
 import { AgentId, AgentIpcChannel } from '../shared/agent/constants';
 import { AppUpdateIpc } from '../shared/appUpdate/constants';
 import { ArtifactBrowserPartition, ArtifactPreviewIpc, ArtifactPreviewProtocol } from '../shared/artifactPreview/constants';
+import { AuthIpcChannel } from '../shared/auth/constants';
 import {
   type BrowserDiagnosticResultStep,
   BrowserDiagnosticStatus,
@@ -52,13 +53,25 @@ import {
   CoworkForkMode,
   CoworkIpcChannel,
 } from '../shared/cowork/constants';
+import {
+  buildCoworkImageAttachmentPreviews,
+  type CoworkImageAttachmentPreview,
+  formatCoworkImageAttachmentLimit,
+  validateCoworkImageAttachmentSize,
+} from '../shared/cowork/imageAttachments';
+import {
+  type CoworkSelectedTextSnippet,
+  normalizeCoworkSelectedTextSnippets,
+} from '../shared/cowork/selectedText';
 import { DialogIpc } from '../shared/dialog/constants';
 import {
   HtmlShareAccessMode,
-  type HtmlShareAccessMode as HtmlShareAccessModeType,
+  type HtmlShareConfigurableStatus,
   HtmlShareErrorCode,
   HtmlShareIpc,
   HtmlShareSourceType,
+  HtmlShareStatus,
+  type HtmlShareStatus as HtmlShareStatusValue,
 } from '../shared/htmlShare/constants';
 import type {
   KitReference,
@@ -100,6 +113,7 @@ import type {
 } from './im/types';
 import { registerCoworkSubagentHandlers } from './ipcHandlers/coworkSubagent';
 import { registerKitHandlers } from './ipcHandlers/kits';
+import { registerMcpHandlers } from './ipcHandlers/mcp';
 import { registerNimQrLoginHandlers } from './ipcHandlers/nimQrLogin';
 import { registerPluginHandlers } from './ipcHandlers/plugins';
 import {
@@ -116,6 +130,7 @@ import {
   type PermissionResult,
 } from './libs/agentEngine';
 import { AppUpdateCoordinator, INSTALLATION_UUID_KEY } from './libs/appUpdateCoordinator';
+import { AuthCallbackRouter } from './libs/authCallbackRouter';
 import {
   clearServerModelMetadata,
   getAllServerModelMetadata,
@@ -143,7 +158,6 @@ import {
 } from './libs/coworkOpenAICompatProxy';
 import {
   generateSessionTitle,
-  getElectronNodeRuntimePath,
   probeCoworkModelReadiness,
 } from './libs/coworkUtil';
 import {
@@ -152,7 +166,6 @@ import {
   getPortalTasksUrl,
   getServerApiBaseUrl,
   getSkillStoreUrl,
-  isTestModeEnabled,
   refreshEndpointsTestMode,
 } from './libs/endpoints';
 import {
@@ -167,11 +180,15 @@ import {
   isPreviewServerUrl,
   stopHtmlPreviewServer,
 } from './libs/htmlPreviewServer';
-import { getHtmlShareBySource, updateHtmlShare, uploadHtmlShare } from './libs/htmlShare/htmlShareClient';
+import {
+  getHtmlShareBySource,
+  updateHtmlShare,
+  updateHtmlShareStatus,
+  uploadHtmlShare,
+} from './libs/htmlShare/htmlShareClient';
 import { packageHtmlFile } from './libs/htmlShare/htmlSharePackager';
 import { getKeyfromAttribution, initializeKeyfromAttribution } from './libs/keyfromAttribution';
 import { exportLogsZip } from './libs/logExport';
-import { McpBridgeServer, type MediaGenerationRequest, type MediaGenerationResponse } from './libs/mcpBridgeServer';
 import { type PersistedGeneratedImageAsset, persistGeneratedImageAssets, type PersistGeneratedImageAssetsResult, persistGeneratedVideoAssets, type RemoteGeneratedMediaAsset } from './libs/mediaAssetPersistence';
 import { migrateAgentModelRefs, parsePrimaryModelRef, resolveQualifiedAgentModelRef } from './libs/openclawAgentModels';
 import {
@@ -189,7 +206,7 @@ import {
   OpenClawConfigImpactReason,
   removeImpactDecisionReasons,
 } from './libs/openclawConfigImpact';
-import { buildProviderSelection, OpenClawConfigSync, type ResolvedMcpServer } from './libs/openclawConfigSync';
+import { buildProviderSelection, OpenClawConfigSync } from './libs/openclawConfigSync';
 import { OpenClawEngineManager, type OpenClawEngineStatus } from './libs/openclawEngineManager';
 import {
   addMemoryEntry,
@@ -207,8 +224,8 @@ import {
 import { collectReferencedEnvVarNames, pickReferencedSecretEnvVars } from './libs/openclawSecretEnv';
 import { startOpenClawTokenProxy, stopOpenClawTokenProxy } from './libs/openclawTokenProxy';
 import { migrateMainAgentWorkspace } from './libs/openclawWorkspaceMigration';
+import { isHiddenUserPluginId } from './libs/pluginManager';
 import { ensurePythonRuntimeReady } from './libs/pythonRuntime';
-import { resolveStdioCommand } from './libs/resolveStdioCommand';
 import { serializeForLog } from './libs/sanitizeForLog';
 import { SqliteBackupManager } from './libs/sqliteBackup/sqliteBackupManager';
 import { runStartupCacheWarmup } from './libs/startupCacheWarmup';
@@ -219,7 +236,7 @@ import {
   setSystemProxyEnabled,
 } from './libs/systemProxy';
 import { getLogFilePath, getRecentMainLogEntries, initLogger } from './logger';
-import { type McpServerFormData, McpStore } from './mcpStore';
+import { type AskUserResponse, McpRuntime } from './mcp/mcpRuntime';
 import {
   MediaGenerationGateReason,
   MediaGenerationTool,
@@ -319,15 +336,20 @@ interface HtmlShareCreateFromHtmlFileInput {
   artifactId: string;
   filePath: string;
   title: string;
-  accessMode: HtmlShareAccessModeType;
 }
 
 interface HtmlShareUpdateFromHtmlFileInput extends HtmlShareCreateFromHtmlFileInput {
   shareId: string;
+  currentStatus?: HtmlShareStatusValue;
 }
 
 interface HtmlShareGetByHtmlFileInput {
   filePath: string;
+}
+
+interface HtmlShareUpdateStatusInput {
+  shareId: string;
+  status: HtmlShareConfigurableStatus;
 }
 
 function sanitizeHtmlShareString(
@@ -352,12 +374,36 @@ function sanitizeHtmlShareTitle(value: unknown): string {
   return sanitizeHtmlShareString(value, 'title', 255);
 }
 
-function sanitizeHtmlShareAccessMode(value: unknown): HtmlShareAccessModeType {
+function validateHtmlShareAccessMode(value: unknown): void {
+  if (value === undefined) return;
   const accessMode = sanitizeHtmlShareString(value, 'accessMode', 32);
-  if (accessMode !== HtmlShareAccessMode.Code && accessMode !== HtmlShareAccessMode.Public) {
-    throw new Error('accessMode must be code or public.');
+  if (accessMode !== HtmlShareAccessMode.Code) {
+    throw new Error('accessMode must be code.');
   }
-  return accessMode;
+}
+
+function sanitizeHtmlShareConfigurableStatus(
+  value: unknown,
+): HtmlShareConfigurableStatus | undefined {
+  if (value === undefined) return undefined;
+  const status = sanitizeHtmlShareString(value, 'status', 32);
+  if (status !== HtmlShareStatus.Live && status !== HtmlShareStatus.Disabled) {
+    throw new Error('status must be live or disabled.');
+  }
+  return status;
+}
+
+function sanitizeHtmlShareStatus(value: unknown): HtmlShareStatusValue | undefined {
+  if (value === undefined) return undefined;
+  const status = sanitizeHtmlShareString(value, 'currentStatus', 32);
+  if (
+    status !== HtmlShareStatus.Live &&
+    status !== HtmlShareStatus.Disabled &&
+    status !== HtmlShareStatus.Failed
+  ) {
+    throw new Error('currentStatus must be live, disabled, or failed.');
+  }
+  return status;
 }
 
 function sanitizeCreateFromHtmlFileInput(input: unknown): HtmlShareCreateFromHtmlFileInput {
@@ -365,12 +411,12 @@ function sanitizeCreateFromHtmlFileInput(input: unknown): HtmlShareCreateFromHtm
     throw new Error('Invalid HTML share request.');
   }
   const source = input as Record<string, unknown>;
+  validateHtmlShareAccessMode(source.accessMode);
   return {
     sessionId: sanitizeHtmlShareString(source.sessionId, 'sessionId', 128),
     artifactId: sanitizeHtmlShareString(source.artifactId, 'artifactId', 128),
     filePath: sanitizeHtmlShareString(source.filePath, 'filePath', 4096),
     title: sanitizeHtmlShareTitle(source.title),
-    accessMode: sanitizeHtmlShareAccessMode(source.accessMode),
   };
 }
 
@@ -380,6 +426,7 @@ function sanitizeUpdateFromHtmlFileInput(input: unknown): HtmlShareUpdateFromHtm
   return {
     ...source,
     shareId: sanitizeHtmlShareString(record.shareId, 'shareId', 64),
+    currentStatus: sanitizeHtmlShareStatus(record.currentStatus),
   };
 }
 
@@ -390,6 +437,21 @@ function sanitizeGetByHtmlFileInput(input: unknown): HtmlShareGetByHtmlFileInput
   const source = input as Record<string, unknown>;
   return {
     filePath: sanitizeHtmlShareString(source.filePath, 'filePath', 4096),
+  };
+}
+
+function sanitizeUpdateHtmlShareStatusInput(input: unknown): HtmlShareUpdateStatusInput {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Invalid HTML share status request.');
+  }
+  const source = input as Record<string, unknown>;
+  const status = sanitizeHtmlShareConfigurableStatus(source.status);
+  if (!status) {
+    throw new Error('status is required.');
+  }
+  return {
+    shareId: sanitizeHtmlShareString(source.shareId, 'shareId', 64),
+    status,
   };
 }
 
@@ -859,16 +921,19 @@ const sanitizeCoworkMessageForIpc = (message: unknown): unknown => {
   }
   const messageRecord = message as { metadata?: unknown; content?: unknown };
 
-  // Preserve imageAttachments in metadata as-is (base64 data can be very large
-  // and must not be truncated by the generic sanitizer).
+  // Preserve image metadata as-is; previews are already size-bounded, while
+  // legacy imageAttachments may contain historical base64 payloads.
   let sanitizedMetadata: unknown;
   if (messageRecord.metadata && typeof messageRecord.metadata === 'object') {
-    const { imageAttachments, ...rest } = messageRecord.metadata as Record<string, unknown>;
+    const { imageAttachments, imageAttachmentPreviews, ...rest } = messageRecord.metadata as Record<string, unknown>;
     const sanitizedRest = sanitizeIpcPayload(rest) as Record<string, unknown> | undefined;
     sanitizedMetadata = {
       ...(sanitizedRest && typeof sanitizedRest === 'object' ? sanitizedRest : {}),
       ...(Array.isArray(imageAttachments) && imageAttachments.length > 0
         ? { imageAttachments }
+        : {}),
+      ...(Array.isArray(imageAttachmentPreviews) && imageAttachmentPreviews.length > 0
+        ? { imageAttachmentPreviews }
         : {}),
     };
   } else {
@@ -1207,15 +1272,7 @@ let coworkStore: CoworkStore | null = null;
 let openClawRuntimeAdapter: OpenClawRuntimeAdapter | null = null;
 let coworkEngineRouter: CoworkEngineRouter | null = null;
 let skillManager: SkillManager | null = null;
-let mcpStore: McpStore | null = null;
-let mcpBridgeServer: McpBridgeServer | null = null;
-// Generated eagerly so the secret is available before the first syncOpenClawConfig
-// call — the gateway process inherits it via LOBSTER_MCP_BRIDGE_SECRET env var at
-// spawn time, avoiding a restart just to pick up the correct secret.
-let mcpBridgeSecret: string = require('crypto').randomUUID();
-// Cache of resolved MCP server configs for the synchronous configSync callback.
-// Populated asynchronously before each syncOpenClawConfig() call.
-let resolvedMcpServersCache: ResolvedMcpServer[] = [];
+let mcpRuntime: McpRuntime | null = null;
 let imGatewayManager: IMGatewayManager | null = null;
 let storeInitPromise: Promise<SqliteStore> | null = null;
 let sqliteBackupManager: SqliteBackupManager | null = null;
@@ -1339,7 +1396,7 @@ const bootstrapOpenClawEngine = async (
         console.error(`[OpenClaw] bootstrap: AskUser server startup failed (non-fatal):`, err);
       });
       console.log(
-        `[OpenClaw] bootstrap: AskUser server setup done (${elapsed()}), askUserUrl=${mcpBridgeServer?.askUserCallbackUrl || 'null'}`,
+        `[OpenClaw] bootstrap: AskUser server setup done (${elapsed()}), askUserUrl=${getMcpRuntime().getAskUserCallbackUrl() || 'null'}`,
       );
 
       // Ensure IDENTITY.md has default content in the main agent workspace
@@ -1396,6 +1453,11 @@ const bootstrapOpenClawEngine = async (
 let pendingTokenRefresh: Promise<string | null> | null = null;
 
 const ensureOpenClawRunningForCowork = async () => {
+  const configApplyStatus = await waitForOpenClawConfigApply('cowork engine startup');
+  if (configApplyStatus) {
+    return configApplyStatus;
+  }
+
   const manager = getOpenClawEngineManager();
   const status = manager.getStatus();
   if (status.phase === 'running') {
@@ -1602,16 +1664,17 @@ const getOpenClawConfigSync = (): OpenClawConfigSync => {
       },
       getResolvedMcpServers: () => {
         // Synchronous wrapper: returns last resolved servers from cache.
-        // The async resolution happens during syncOpenClawConfig via getResolvedMcpServers().
-        return resolvedMcpServersCache;
+        // The async resolution happens during syncOpenClawConfig via McpRuntime.
+        return getMcpRuntime().getResolvedServersCache();
       },
-      getAskUserCallbackUrl: () => mcpBridgeServer?.askUserCallbackUrl ?? null,
-      getMediaCallbackUrl: () => mcpBridgeServer?.mediaCallbackUrl ?? null,
-      getMcpBridgeSecret: () => mcpBridgeSecret,
+      getAskUserCallbackUrl: () => getMcpRuntime().getAskUserCallbackUrl(),
+      getMediaCallbackUrl: () => getMcpRuntime().getMediaCallbackUrl(),
+      getMcpBridgeSecret: () => getMcpRuntime().getBridgeSecret(),
       getAgents: () => getCoworkStore().listAgents(),
       getUserPlugins: () =>
         getCoworkStore()
           .listUserPlugins()
+          .filter(p => !isHiddenUserPluginId(p.pluginId))
           .map(p => ({ pluginId: p.pluginId, enabled: p.enabled, config: p.config })),
       canUseMediaGeneration: () => cachedMediaGenerationEntitled,
     });
@@ -1649,12 +1712,80 @@ const clearDeferredRestart = () => {
   }
 };
 
+type SyncOpenClawConfigOptions = {
+  reason: string;
+  restartGatewayIfRunning?: boolean;
+  expectedImpact?: OpenClawConfigImpact;
+};
+
+type SyncOpenClawConfigResult = {
+  success: boolean;
+  changed: boolean;
+  status?: OpenClawEngineStatus;
+  error?: string;
+};
+
+type GatewayConfigApplyState = {
+  reason: string;
+  startedAt: number;
+  restartRequired: boolean;
+  promise: Promise<void>;
+};
+
+let openClawConfigApplyQueue: Promise<void> = Promise.resolve();
+let openClawConfigApplyState: GatewayConfigApplyState | null = null;
+let openClawConfigApplyGeneration = 0;
+let deferredRestartReason: string | null = null;
+
+const buildConfigApplyPendingStatus = (message: string): OpenClawEngineStatus => {
+  const current = getOpenClawEngineManager().getStatus();
+  return {
+    phase: 'starting',
+    version: current.version,
+    message,
+    canRetry: false,
+  };
+};
+
+const waitForOpenClawConfigApply = async (context: string): Promise<OpenClawEngineStatus | null> => {
+  const pendingApply = openClawConfigApplyState;
+  if (pendingApply) {
+    console.log(
+      '[OpenClawConfigApply] waiting for pending config sync before proceeding.',
+      `Context ${context}.`,
+      `Reason ${pendingApply.reason}.`,
+      `Restart required ${pendingApply.restartRequired}.`,
+    );
+    try {
+      await pendingApply.promise;
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : 'OpenClaw config sync failed.';
+      return buildConfigApplyPendingStatus(message);
+    }
+  }
+
+  if (deferredRestartReason) {
+    return buildConfigApplyPendingStatus(
+      'OpenClaw is applying MCP configuration. Please try again shortly.',
+    );
+  }
+
+  return null;
+};
+
 const executeDeferredGatewayRestart = async (reason: string) => {
   clearDeferredRestart();
+  deferredRestartReason = null;
   console.log(
     `${gwDiagTs()} executeDeferredGatewayRestart: performing deferred restart (reason: ${reason})`,
   );
-  await syncOpenClawConfig({ reason: `deferred:${reason}` });
+  await syncOpenClawConfig({
+    reason: `deferred:${reason}`,
+    restartGatewayIfRunning: true,
+    expectedImpact: OpenClawConfigImpact.Restart,
+  });
 };
 
 const scheduleDeferredGatewayRestart = (reason: string) => {
@@ -1670,6 +1801,7 @@ const scheduleDeferredGatewayRestart = (reason: string) => {
   console.log(
     `${gwDiagTs()} scheduleDeferredGatewayRestart: scheduling deferred restart, polling every ${DEFERRED_RESTART_POLL_MS}ms, max wait ${DEFERRED_RESTART_MAX_WAIT_MS}ms (reason: ${reason})`,
   );
+  deferredRestartReason = reason;
   deferredRestartTimer = setInterval(() => {
     if (!hasActiveGatewayWorkloads()) {
       void executeDeferredGatewayRestart(reason);
@@ -1685,30 +1817,25 @@ const scheduleDeferredGatewayRestart = (reason: string) => {
   }, DEFERRED_RESTART_MAX_WAIT_MS);
 };
 
-const syncOpenClawConfig = async (
-  options: { reason: string; restartGatewayIfRunning?: boolean } = { reason: 'unknown' },
-): Promise<{
-  success: boolean;
-  changed: boolean;
-  status?: OpenClawEngineStatus;
-  error?: string;
-}> => {
+const _syncOpenClawConfigImpl = async (
+  options: SyncOpenClawConfigOptions = { reason: 'unknown' },
+): Promise<SyncOpenClawConfigResult> => {
   const D = gwDiagTs;
   console.log(
-    `${D()} ──── syncOpenClawConfig START reason=${options.reason} restartIfRunning=${!!options.restartGatewayIfRunning}`,
+    `${D()} ──── syncOpenClawConfig START reason=${options.reason} restartIfRunning=${!!options.restartGatewayIfRunning} expectedImpact=${options.expectedImpact ?? OpenClawConfigImpact.None}`,
   );
 
   // Resolve MCP servers before sync (async → cache for synchronous callback)
   try {
-    resolvedMcpServersCache = await getResolvedMcpServers();
+    await getMcpRuntime().refreshResolvedServersCache();
   } catch (err) {
     console.warn(`[OpenClaw] getResolvedMcpServers failed (non-fatal):`, err);
-    resolvedMcpServersCache = [];
+    getMcpRuntime().clearResolvedServersCache();
   }
 
   const syncResult = getOpenClawConfigSync().sync(options.reason);
   console.log(
-    `${D()} sync() ok=${syncResult.ok} changed=${syncResult.changed} bindingsChanged=${!!syncResult.bindingsChanged}`,
+    `${D()} sync() ok=${syncResult.ok} changed=${syncResult.changed} bindingsChanged=${!!syncResult.bindingsChanged} restartImpact=${syncResult.restartImpact ?? OpenClawConfigImpact.None}`,
   );
   if (!syncResult.ok) {
     console.log(`${D()} sync FAILED: ${syncResult.error}`);
@@ -1780,13 +1907,20 @@ const syncOpenClawConfig = async (
   // Force a hard restart when env/bindings changed, or when the caller explicitly
   // requires a running gateway restart. Some IM account state changes are stored
   // outside openclaw.json, so the explicit flag must not depend on config diffing.
+  const expectedRestartImpact =
+    syncResult.changed
+    && options.expectedImpact === OpenClawConfigImpact.Restart;
+  const syncRestartImpact =
+    syncResult.restartImpact === OpenClawConfigImpact.Restart;
   const needsHardRestart =
     secretEnvVarsChanged ||
     syncResult.bindingsChanged === true ||
+    syncRestartImpact ||
+    expectedRestartImpact ||
     options.restartGatewayIfRunning === true;
 
   console.log(
-    `${D()} needsHardRestart=${needsHardRestart} (envChanged=${secretEnvVarsChanged} bindingsChanged=${!!syncResult.bindingsChanged} configChanged=${syncResult.changed} restartFlag=${!!options.restartGatewayIfRunning})`,
+    `${D()} needsHardRestart=${needsHardRestart} (envChanged=${secretEnvVarsChanged} bindingsChanged=${!!syncResult.bindingsChanged} configChanged=${syncResult.changed} restartImpact=${syncResult.restartImpact ?? OpenClawConfigImpact.None} expectedRestart=${expectedRestartImpact} restartFlag=${!!options.restartGatewayIfRunning})`,
   );
 
   if (!needsHardRestart) {
@@ -1842,6 +1976,51 @@ const syncOpenClawConfig = async (
     changed: true,
     status: restarted,
   };
+};
+
+const syncOpenClawConfig = async (
+  options: SyncOpenClawConfigOptions = { reason: 'unknown' },
+): Promise<SyncOpenClawConfigResult> => {
+  const generation = ++openClawConfigApplyGeneration;
+  const startAfterPrevious = openClawConfigApplyQueue.catch(() => {});
+  const restartRequired =
+    options.restartGatewayIfRunning === true
+    || options.expectedImpact === OpenClawConfigImpact.Restart;
+  const resultPromise = startAfterPrevious.then(() => _syncOpenClawConfigImpl(options));
+  const barrierPromise = resultPromise.then((result) => {
+    if (!result.success) {
+      throw new Error(result.error || 'OpenClaw config sync failed.');
+    }
+  });
+  barrierPromise.catch(() => {
+    // The awaiter will surface the error when a user action is blocked by this barrier.
+  });
+
+  openClawConfigApplyState = {
+    reason: options.reason,
+    startedAt: Date.now(),
+    restartRequired,
+    promise: barrierPromise,
+  };
+
+  openClawConfigApplyQueue = resultPromise.then(
+    (): void => undefined,
+    (): void => undefined,
+  );
+
+  try {
+    return await resultPromise;
+  } catch (error) {
+    return {
+      success: false,
+      changed: false,
+      error: error instanceof Error ? error.message : 'OpenClaw config sync failed.',
+    };
+  } finally {
+    if (generation === openClawConfigApplyGeneration) {
+      openClawConfigApplyState = null;
+    }
+  }
 };
 
 const bindCoworkRuntimeForwarder = (): void => {
@@ -2030,124 +2209,18 @@ const getSkillManager = () => {
   return skillManager;
 };
 
-const getMcpStore = () => {
-  if (!mcpStore) {
-    const sqliteStore = getStore();
-    mcpStore = new McpStore(sqliteStore.getDatabase());
+const getMcpRuntime = (): McpRuntime => {
+  if (!mcpRuntime) {
+    mcpRuntime = new McpRuntime({
+      getStore,
+      syncOpenClawConfig,
+    });
   }
-  return mcpStore;
+  return mcpRuntime;
 };
 
-/**
- * Start the MCP Bridge: server manager + HTTP callback.
- * Called during OpenClaw bootstrap before config sync.
- * Returns the bridge config to be written into openclaw.json.
- *
- * The HTTP callback server is always started (even without MCP servers)
- * because the AskUserQuestion plugin also uses it for user confirmation dialogs.
- */
-/**
- * Start the AskUser HTTP callback server (serves ask-user-question plugin).
- * MCP server connections are now handled natively by OpenClaw via mcp.servers config.
- */
 const startAskUserServer = async (): Promise<void> => {
-  if (mcpBridgeServer?.port) return; // already running
-
-  if (!mcpBridgeServer) {
-    mcpBridgeServer = new McpBridgeServer(mcpBridgeSecret);
-  }
-  console.log('[AskUser] starting HTTP callback server...');
-  await mcpBridgeServer.start();
-
-  // Register AskUserQuestion callback — shows a permission modal when the
-  // ask-user-question OpenClaw plugin sends a request via HTTP.
-  mcpBridgeServer.onAskUser(request => {
-    const windows = BrowserWindow.getAllWindows();
-    windows.forEach(win => {
-      if (win.isDestroyed()) return;
-      try {
-        win.webContents.send('cowork:stream:permission', {
-          sessionId: '__askuser__',
-          request: {
-            requestId: request.requestId,
-            toolName: 'AskUserQuestion',
-            toolInput: { questions: request.questions },
-          },
-        });
-      } catch (error) {
-        console.error('[AskUser] failed to send permission request to window:', error);
-      }
-    });
-  });
-
-  // Dismiss the AskUser modal when timeout or resolved from server side.
-  mcpBridgeServer.onAskUserDismiss(requestId => {
-    const windows = BrowserWindow.getAllWindows();
-    windows.forEach(win => {
-      if (win.isDestroyed()) return;
-      try {
-        win.webContents.send('cowork:stream:permissionDismiss', { requestId });
-      } catch {
-        // ignore
-      }
-    });
-  });
-
-  // Media generation tool callback — handles lobsterai_image_generate / lobsterai_video_generate
-  mcpBridgeServer.onMediaGeneration(async (request) => {
-    if (!mediaGenerationHandler) {
-      return {
-        content: [{ type: 'text', text: 'Media generation service is not ready yet.' }],
-        isError: true,
-      };
-    }
-    return await mediaGenerationHandler(request);
-  });
-};
-
-/**
- * Get resolved MCP server configs for writing into openclaw.json mcp.servers.
- * Resolves stdio commands for the current platform (Windows/macOS packaged builds).
- */
-const getResolvedMcpServers = async (): Promise<ResolvedMcpServer[]> => {
-  const enabledServers = getMcpStore().getEnabledServers();
-  const resolved: ResolvedMcpServer[] = [];
-
-  // The MCP SDK's StdioClientTransport only inherits a limited set of env vars
-  // (PATH, APPDATA, TEMP, etc.). Our node/npx shims in PATH need these vars.
-  // Inject them into each stdio server's env so they're passed through.
-  const electronPath = getElectronNodeRuntimePath();
-  const npmBinDir = app.isPackaged
-    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'npm', 'bin')
-    : '';
-
-  for (const server of enabledServers) {
-    if (server.transportType === 'stdio') {
-      const r = await resolveStdioCommand(server);
-      // Merge gateway env vars needed by shims as fallback
-      const shimEnv: Record<string, string> = {
-        LOBSTERAI_ELECTRON_PATH: electronPath,
-      };
-      if (npmBinDir) {
-        shimEnv.LOBSTERAI_NPM_BIN_DIR = npmBinDir;
-      }
-      resolved.push({
-        name: server.name,
-        transportType: 'stdio',
-        command: r.command,
-        args: r.args,
-        env: { ...shimEnv, ...(r.env || {}) },
-      });
-    } else {
-      resolved.push({
-        name: server.name,
-        transportType: server.transportType,
-        url: server.url,
-        headers: server.headers,
-      });
-    }
-  }
-  return resolved;
+  await getMcpRuntime().startAskUserServer();
 };
 
 const getIMGatewayManager = () => {
@@ -2179,6 +2252,10 @@ const getIMGatewayManager = () => {
         });
       },
       ensureOpenClawGatewayConnected: async () => {
+        const configApplyStatus = await waitForOpenClawConfigApply('IM gateway client connection');
+        if (configApplyStatus) {
+          throw new Error(configApplyStatus.message || 'OpenClaw is applying configuration changes.');
+        }
         if (openClawRuntimeAdapter) {
           await openClawRuntimeAdapter.connectGatewayIfNeeded();
         }
@@ -2187,6 +2264,10 @@ const getIMGatewayManager = () => {
       ensureOpenClawGatewayReady: async () => {
         if (!openClawRuntimeAdapter) {
           throw new Error('OpenClaw runtime adapter not initialized.');
+        }
+        const configApplyStatus = await waitForOpenClawConfigApply('IM gateway readiness check');
+        if (configApplyStatus) {
+          throw new Error(configApplyStatus.message || 'OpenClaw is applying configuration changes.');
         }
         await openClawRuntimeAdapter.ensureReady();
         await openClawRuntimeAdapter.connectGatewayIfNeeded();
@@ -2377,14 +2458,34 @@ type CoworkImageAttachmentMain = {
   name: string;
   mimeType: string;
   base64Data: string;
+  sizeBytes?: number;
+  localPath?: string;
+  previewMimeType?: string;
+  previewBase64Data?: string;
 };
+
+function validateCoworkImageAttachmentsForRuntime(
+  imageAttachments?: CoworkImageAttachmentMain[],
+): { ok: true } | { ok: false; error: string } {
+  for (const attachment of imageAttachments ?? []) {
+    const validation = validateCoworkImageAttachmentSize(attachment);
+    if (!validation.ok) {
+      return {
+        ok: false,
+        error: `Image attachment ${attachment.name} exceeds the ${formatCoworkImageAttachmentLimit(validation.maxBytes)} limit.`,
+      };
+    }
+  }
+  return { ok: true };
+}
 
 function buildCoworkUserSelectionMetadata(options: {
   skillIds?: string[];
   kitIds?: string[];
   kitReferences?: KitReference[];
   resolvedKitCapabilities?: ResolvedKitCapabilities;
-  imageAttachments?: CoworkImageAttachmentMain[];
+  selectedTextSnippets?: CoworkSelectedTextSnippet[];
+  imageAttachmentPreviews?: CoworkImageAttachmentPreview[];
 }): Record<string, unknown> | undefined {
   const metadata: Record<string, unknown> = {};
 
@@ -2400,11 +2501,22 @@ function buildCoworkUserSelectionMetadata(options: {
       metadata.resolvedKitCapabilities = options.resolvedKitCapabilities;
     }
   }
-  if (options.imageAttachments?.length) {
-    metadata.imageAttachments = options.imageAttachments;
+  if (options.imageAttachmentPreviews?.length) {
+    metadata.imageAttachmentPreviews = options.imageAttachmentPreviews;
+  }
+  if (options.selectedTextSnippets?.length) {
+    metadata.selectedTextSnippets = options.selectedTextSnippets;
   }
 
   return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
+function normalizeSelectedTextSnippetsForIpc(value: unknown): CoworkSelectedTextSnippet[] {
+  const result = normalizeCoworkSelectedTextSnippets(value);
+  if (result.success === false) {
+    throw new Error(`Invalid selected text snippets: ${result.error}`);
+  }
+  return result.snippets;
 }
 
 // 获取正确的预加载脚本路径
@@ -2433,7 +2545,6 @@ const activeStreamControllers = new Map<string, AbortController>();
 
 // Media generation selection per session (for turn-level tool gating)
 const mediaSelectionBySession = new Map<string, MediaSelectionState>();
-let mediaGenerationHandler: ((request: MediaGenerationRequest) => Promise<MediaGenerationResponse>) | null = null;
 
 // Media attachment references per session (for @ mentions, FR-9)
 const mediaReferencesBySession = new Map<string, MediaAttachmentRefMain[]>();
@@ -2653,29 +2764,21 @@ if (!gotTheLock) {
     app.setAsDefaultProtocolClient('lobsterai');
   }
 
-  // Buffer for deep link auth code received before renderer is ready
-  let pendingAuthCode: string | null = null;
-  let authCallbackListenerReady = false;
+  const authCallbackRouter = new AuthCallbackRouter({
+    getTarget: () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return null;
+      return mainWindow.webContents;
+    },
+    onParseError: error => {
+      console.error('[Main] Failed to parse deep link:', error);
+    },
+  });
 
   /**
    * Parse a lobsterai:// deep link and send (or buffer) the auth code.
    */
   const handleDeepLink = (url: string) => {
-    try {
-      const parsed = new URL(url);
-      if (parsed.hostname === 'auth' && parsed.pathname === '/callback') {
-        const code = parsed.searchParams.get('code');
-        if (code) {
-          if (authCallbackListenerReady && mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('auth:callback', { code });
-          } else {
-            pendingAuthCode = code;
-          }
-        }
-      }
-    } catch (e) {
-      console.error('[Main] Failed to parse deep link:', e);
-    }
+    authCallbackRouter.handleDeepLink(url);
   };
 
   ipcMain.on('log:fromRenderer', (_event, level: string, tag: string, message: string) => {
@@ -2684,12 +2787,8 @@ if (!gotTheLock) {
   });
 
   // Allow renderer to retrieve a buffered auth code on init
-  ipcMain.handle('auth:getPendingCallback', () => {
-    authCallbackListenerReady = true;
-    const code = pendingAuthCode;
-    pendingAuthCode = null;
-    return code;
-  });
+  ipcMain.handle(AuthIpcChannel.GetPendingCallback, () =>
+    authCallbackRouter.markListenerReadyAndConsumePending());
 
   // macOS: handle open-url event for deep links
   app.on('open-url', (event, url) => {
@@ -3307,7 +3406,7 @@ if (!gotTheLock) {
       const endpoint = mediaType === 'image' ? '/api/media/images/generate' : '/api/media/videos/generate';
 
       // Video generation confirmation: inform user about cost and duration
-      if (mediaType === 'video' && mcpBridgeServer) {
+      if (mediaType === 'video') {
         const durationSec = typeof args.durationSeconds === 'number' ? args.durationSeconds : null;
         const costPoints = durationSec ? durationSec * 100 : null;
         const portalTasksUrl = getPortalTasksUrl();
@@ -3321,7 +3420,7 @@ if (!gotTheLock) {
           `生成后请妥善保存视频，若误删可在[「个人主页-用量详情-生成任务」](${portalTasksUrl})中下载`,
           '~~（链接有时效性，请尽快下载）~~',
         ].join('\n');
-        const confirmResponse = await mcpBridgeServer.askUserInternal([{
+        const confirmResponse = await getMcpRuntime().askUserInternal([{
           question: questionText,
           title: '确认生成视频？',
           subtitle,
@@ -3331,8 +3430,8 @@ if (!gotTheLock) {
           ],
         }]);
 
-        const userCancelled = confirmResponse.behavior === 'deny'
-          || confirmResponse.answers?.[questionText] === '取消';
+        const userCancelled = confirmResponse?.behavior === 'deny'
+          || confirmResponse?.answers?.[questionText] === '取消';
 
         if (userCancelled) {
           console.log('[MediaGeneration] user cancelled video generation confirmation.');
@@ -3632,7 +3731,7 @@ if (!gotTheLock) {
     }
   };
 
-  mediaGenerationHandler = handleMediaGenerationCallback;
+  getMcpRuntime().setMediaGenerationHandler(handleMediaGenerationCallback);
 
   const registerMediaTaskForPolling = (tracker: MediaTaskTracker) => {
     pendingMediaTasks.set(tracker.taskId, tracker);
@@ -4186,15 +4285,12 @@ if (!gotTheLock) {
   ipcMain.handle(HtmlShareIpc.CreateFromHtmlFile, async (_event, input: unknown) => {
     let archivePath: string | undefined;
     try {
-      if (!isTestModeEnabled()) {
-        return { success: false, code: HtmlShareErrorCode.FeatureUnavailable };
-      }
       const options = sanitizeCreateFromHtmlFileInput(input);
       console.debug(
         `[HtmlShare] received HTML file share request for session ${options.sessionId} and artifact ${options.artifactId}`,
       );
       console.debug(
-        `[HtmlShare] HTML file share uses ${options.accessMode} access and source file ${options.filePath}`,
+        `[HtmlShare] HTML file share uses share-code access and source file ${options.filePath}`,
       );
       const clientSourceKey = buildHtmlShareClientSourceKey(options.filePath);
       const packaged = await packageHtmlFile(options.filePath);
@@ -4209,7 +4305,6 @@ if (!gotTheLock) {
         {
           archivePath: packaged.archivePath,
           sourceType: HtmlShareSourceType.HtmlFile,
-          accessMode: options.accessMode,
           clientSourceKey,
           sessionId: options.sessionId,
           artifactId: options.artifactId,
@@ -4246,9 +4341,6 @@ if (!gotTheLock) {
 
   ipcMain.handle(HtmlShareIpc.GetByHtmlFile, async (_event, input: unknown) => {
     try {
-      if (!isTestModeEnabled()) {
-        return { success: false, code: HtmlShareErrorCode.FeatureUnavailable };
-      }
       const options = sanitizeGetByHtmlFileInput(input);
       const clientSourceKey = buildHtmlShareClientSourceKey(options.filePath);
       return await getHtmlShareBySource(
@@ -4270,10 +4362,10 @@ if (!gotTheLock) {
   ipcMain.handle(HtmlShareIpc.UpdateFromHtmlFile, async (_event, input: unknown) => {
     let archivePath: string | undefined;
     try {
-      if (!isTestModeEnabled()) {
-        return { success: false, code: HtmlShareErrorCode.FeatureUnavailable };
-      }
       const options = sanitizeUpdateFromHtmlFileInput(input);
+      if (options.currentStatus === HtmlShareStatus.Disabled) {
+        return { success: false, code: HtmlShareErrorCode.DisabledCannotUpdate };
+      }
       const clientSourceKey = buildHtmlShareClientSourceKey(options.filePath);
       const packaged = await packageHtmlFile(options.filePath);
       archivePath = packaged.archivePath;
@@ -4285,7 +4377,6 @@ if (!gotTheLock) {
         {
           archivePath: packaged.archivePath,
           sourceType: HtmlShareSourceType.HtmlFile,
-          accessMode: options.accessMode,
           clientSourceKey,
           sessionId: options.sessionId,
           artifactId: options.artifactId,
@@ -4317,11 +4408,27 @@ if (!gotTheLock) {
     }
   });
 
+  ipcMain.handle(HtmlShareIpc.UpdateStatus, async (_event, input: unknown) => {
+    try {
+      const options = sanitizeUpdateHtmlShareStatusInput(input);
+      return await updateHtmlShareStatus(
+        getServerApiBaseUrl(),
+        getHtmlSharePublicBaseUrl(),
+        fetchWithAuth,
+        options.shareId,
+        options.status,
+      );
+    } catch (error) {
+      console.error('[HtmlShare] failed to update share status:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to update share status',
+      };
+    }
+  });
+
   ipcMain.handle(HtmlShareIpc.Get, async (_event, shareId: unknown) => {
     try {
-      if (!isTestModeEnabled()) {
-        return { success: false, code: HtmlShareErrorCode.FeatureUnavailable };
-      }
       const id = sanitizeHtmlShareString(shareId, 'shareId', 64);
       const resp = await fetchWithAuth(
         `${getServerApiBaseUrl()}/api/html-shares/${encodeURIComponent(id)}`,
@@ -4345,24 +4452,14 @@ if (!gotTheLock) {
 
   ipcMain.handle(HtmlShareIpc.Disable, async (_event, shareId: unknown) => {
     try {
-      if (!isTestModeEnabled()) {
-        return { success: false, code: HtmlShareErrorCode.FeatureUnavailable };
-      }
       const id = sanitizeHtmlShareString(shareId, 'shareId', 64);
-      const resp = await fetchWithAuth(
-        `${getServerApiBaseUrl()}/api/html-shares/${encodeURIComponent(id)}`,
-        {
-          method: 'DELETE',
-        },
+      return await updateHtmlShareStatus(
+        getServerApiBaseUrl(),
+        getHtmlSharePublicBaseUrl(),
+        fetchWithAuth,
+        id,
+        HtmlShareStatus.Disabled,
       );
-      const body = (await resp.json().catch((): null => null)) as {
-        code?: number;
-        message?: string;
-      } | null;
-      if (!resp.ok || body?.code !== 0) {
-        return { success: false, error: body?.message || `Share disable failed: ${resp.status}` };
-      }
-      return { success: true };
     } catch (error) {
       return {
         success: false,
@@ -4687,156 +4784,7 @@ if (!gotTheLock) {
     }
   });
 
-  // MCP Server IPC handlers
-  ipcMain.handle('mcp:list', () => {
-    try {
-      const servers = getMcpStore().listServers();
-      return { success: true, servers };
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to list MCP servers',
-      };
-    }
-  });
-
-  ipcMain.handle(
-    'mcp:create',
-    async (
-      _event,
-      data: {
-        name: string;
-        description: string;
-        transportType: string;
-        command?: string;
-        args?: string[];
-        env?: Record<string, string>;
-        url?: string;
-        headers?: Record<string, string>;
-      },
-    ) => {
-      try {
-        getMcpStore().createServer(data as McpServerFormData);
-        const servers = getMcpStore().listServers();
-        // Sync openclaw.json with updated mcp.servers (OpenClaw handles hot-reload)
-        syncOpenClawConfig({ reason: 'mcp-server-created' }).catch(err =>
-          console.error('[MCP] config sync error:', err),
-        );
-        return { success: true, servers };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : 'Failed to create MCP server',
-        };
-      }
-    },
-  );
-
-  ipcMain.handle(
-    'mcp:update',
-    async (
-      _event,
-      id: string,
-      data: {
-        name?: string;
-        description?: string;
-        transportType?: string;
-        command?: string;
-        args?: string[];
-        env?: Record<string, string>;
-        url?: string;
-        headers?: Record<string, string>;
-      },
-    ) => {
-      try {
-        getMcpStore().updateServer(id, data as Partial<McpServerFormData>);
-        const servers = getMcpStore().listServers();
-        syncOpenClawConfig({ reason: 'mcp-server-updated' }).catch(err =>
-          console.error('[MCP] config sync error:', err),
-        );
-        return { success: true, servers };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : 'Failed to update MCP server',
-        };
-      }
-    },
-  );
-
-  ipcMain.handle('mcp:delete', async (_event, id: string) => {
-    try {
-      getMcpStore().deleteServer(id);
-      const servers = getMcpStore().listServers();
-      syncOpenClawConfig({ reason: 'mcp-server-deleted' }).catch(err =>
-        console.error('[MCP] config sync error:', err),
-      );
-      return { success: true, servers };
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to delete MCP server',
-      };
-    }
-  });
-
-  ipcMain.handle('mcp:setEnabled', async (_event, options: { id: string; enabled: boolean }) => {
-    try {
-      getMcpStore().setEnabled(options.id, options.enabled);
-      const servers = getMcpStore().listServers();
-      syncOpenClawConfig({ reason: 'mcp-server-toggled' }).catch(err =>
-        console.error('[MCP] config sync error:', err),
-      );
-      return { success: true, servers };
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to update MCP server',
-      };
-    }
-  });
-
-  ipcMain.handle('mcp:fetchMarketplace', async () => {
-    const url = app.isPackaged
-      ? 'https://api-overmind.youdao.com/openapi/get/luna/hardware/lobsterai/prod/mcp-marketplace'
-      : 'https://api-overmind.youdao.com/openapi/get/luna/hardware/lobsterai/test/mcp-marketplace';
-    try {
-      const https = await import('https');
-      const data = await new Promise<string>((resolve, reject) => {
-        const req = https.get(url, { timeout: 10000 }, res => {
-          if (res.statusCode !== 200) {
-            reject(new Error(`HTTP ${res.statusCode}`));
-            res.resume();
-            return;
-          }
-          let body = '';
-          res.setEncoding('utf8');
-          res.on('data', (chunk: string) => {
-            body += chunk;
-          });
-          res.on('end', () => resolve(body));
-          res.on('error', reject);
-        });
-        req.on('error', reject);
-        req.on('timeout', () => {
-          req.destroy();
-          reject(new Error('Request timeout'));
-        });
-      });
-      const json = JSON.parse(data);
-      const value = json?.data?.value;
-      if (!value) {
-        return { success: false, error: 'Invalid response: missing data.value' };
-      }
-      const marketplace = typeof value === 'string' ? JSON.parse(value) : value;
-      return { success: true, data: marketplace };
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to fetch marketplace',
-      };
-    }
-  });
+  registerMcpHandlers({ getMcpRuntime, syncOpenClawConfig });
 
   // Cowork IPC handlers
   ipcMain.handle(
@@ -4864,9 +4812,17 @@ if (!gotTheLock) {
           videoModelId?: string;
         };
         mediaReferences?: MediaAttachmentRefMain[];
+        selectedTextSnippets?: CoworkSelectedTextSnippet[];
       },
     ) => {
       try {
+        const ipcStartedAtMs = Date.now();
+        console.log(
+          '[CoworkFirstResponseTiming] start IPC received.',
+          `Prompt length ${options.prompt.length}.`,
+          `Image attachments ${options.imageAttachments?.length ?? 0}.`,
+          `Agent ${options.agentId || 'main'}.`,
+        );
         const engineStatus = await ensureOpenClawRunningForCowork();
         if (engineStatus.phase !== 'running') {
           return getEngineNotReadyResponse(engineStatus);
@@ -4886,6 +4842,13 @@ if (!gotTheLock) {
             error: 'Please select a task folder before submitting.',
           };
         }
+        const imageAttachmentValidation = validateCoworkImageAttachmentsForRuntime(options.imageAttachments);
+        if (imageAttachmentValidation.ok === false) {
+          return {
+            success: false,
+            error: imageAttachmentValidation.error,
+          };
+        }
 
         const fallbackTitle = buildSessionTitleFromInput(
           options.prompt,
@@ -4894,6 +4857,13 @@ if (!gotTheLock) {
         const title = options.title?.trim() || fallbackTitle;
         const taskWorkingDirectory = resolveTaskWorkingDirectory(selectedTaskDirectory);
         const runtimeSkillIds = options.runtimeSkillIds ?? options.activeSkillIds;
+        const selectedTextSnippets = normalizeSelectedTextSnippetsForIpc(options.selectedTextSnippets);
+        if (selectedTextSnippets.length > 0) {
+          console.log(
+            `[CoworkSelectedText] accepted ${selectedTextSnippets.length} excerpts with `
+            + `${selectedTextSnippets.reduce((total, snippet) => total + snippet.text.length, 0)} characters for a new session`,
+          );
+        }
 
         const session = coworkStoreInstance.createSession(
           title,
@@ -4935,12 +4905,14 @@ if (!gotTheLock) {
             })),
           });
         }
+        const imageAttachmentPreviews = buildCoworkImageAttachmentPreviews(options.imageAttachments);
         const messageMetadata = buildCoworkUserSelectionMetadata({
           skillIds: options.activeSkillIds,
           kitIds: options.kitIds,
           kitReferences: options.kitReferences,
           resolvedKitCapabilities: options.resolvedKitCapabilities,
-          imageAttachments: options.imageAttachments,
+          selectedTextSnippets,
+          imageAttachmentPreviews,
         });
         coworkStoreInstance.addMessage(session.id, {
           type: 'user',
@@ -4951,6 +4923,11 @@ if (!gotTheLock) {
         coworkStoreInstance.updateSession(session.id, { status: 'running' });
 
         const runtime = getCoworkEngineRouter();
+        console.log(
+          '[CoworkFirstResponseTiming] start IPC dispatched to runtime.',
+          `Session ${session.id}.`,
+          `Elapsed ${Date.now() - ipcStartedAtMs}ms.`,
+        );
         runtime
           .startSession(session.id, options.prompt, {
             skipInitialUserMessage: true,
@@ -4966,6 +4943,7 @@ if (!gotTheLock) {
             agentId: options.agentId,
             mediaSelection: options.mediaSelection,
             mediaReferences: options.mediaReferences,
+            selectedTextSnippets,
           })
           .catch(error => {
             console.error('[Cowork] session error:', error);
@@ -5025,9 +5003,17 @@ if (!gotTheLock) {
           videoModelId?: string;
         };
         mediaReferences?: MediaAttachmentRefMain[];
+        selectedTextSnippets?: CoworkSelectedTextSnippet[];
       },
     ) => {
       try {
+        const ipcStartedAtMs = Date.now();
+        console.log(
+          '[CoworkFirstResponseTiming] continue IPC received.',
+          `Session ${options.sessionId}.`,
+          `Prompt length ${options.prompt.length}.`,
+          `Image attachments ${options.imageAttachments?.length ?? 0}.`,
+        );
         const engineStatus = await ensureOpenClawRunningForCowork();
         if (engineStatus.phase !== 'running') {
           return getEngineNotReadyResponse(engineStatus);
@@ -5035,6 +5021,20 @@ if (!gotTheLock) {
 
         const runtime = getCoworkEngineRouter();
         const existingSession = getCoworkStore().getSession(options.sessionId);
+        const selectedTextSnippets = normalizeSelectedTextSnippetsForIpc(options.selectedTextSnippets);
+        if (selectedTextSnippets.length > 0) {
+          console.log(
+            `[CoworkSelectedText] accepted ${selectedTextSnippets.length} excerpts with `
+            + `${selectedTextSnippets.reduce((total, snippet) => total + snippet.text.length, 0)} characters for session ${options.sessionId}`,
+          );
+        }
+        const imageAttachmentValidation = validateCoworkImageAttachmentsForRuntime(options.imageAttachments);
+        if (imageAttachmentValidation.ok === false) {
+          return {
+            success: false,
+            error: imageAttachmentValidation.error,
+          };
+        }
 
         if (options.mediaSelection && options.mediaSelection.mode !== 'none') {
           mediaSelectionBySession.set(options.sessionId, options.mediaSelection);
@@ -5060,6 +5060,11 @@ if (!gotTheLock) {
           });
         }
 
+        console.log(
+          '[CoworkFirstResponseTiming] continue IPC dispatched to runtime.',
+          `Session ${options.sessionId}.`,
+          `Elapsed ${Date.now() - ipcStartedAtMs}ms.`,
+        );
         runtime
           .continueSession(options.sessionId, options.prompt, {
             systemPrompt: mergeCoworkSystemPrompt(
@@ -5073,6 +5078,7 @@ if (!gotTheLock) {
             imageAttachments: options.imageAttachments,
             mediaSelection: options.mediaSelection,
             mediaReferences: options.mediaReferences,
+            selectedTextSnippets,
           })
           .catch(error => {
             console.error('[Cowork] continue error:', error);
@@ -5762,9 +5768,9 @@ if (!gotTheLock) {
       // Both calls are safe to invoke unconditionally; exactly one will match.
 
         // AskUserQuestion plugin responses go to the bridge server, not the runtime
-        if (mcpBridgeServer && options.requestId) {
+        if (options.requestId) {
           const result = options.result;
-          const askUserResponse: import('./libs/mcpBridgeServer').AskUserResponse = {
+          const askUserResponse: AskUserResponse = {
             behavior: result.behavior === 'allow' ? 'allow' : 'deny',
             answers:
               result.behavior === 'allow' &&
@@ -5775,7 +5781,7 @@ if (!gotTheLock) {
                     | undefined)
                 : undefined,
           };
-          mcpBridgeServer.resolveAskUser(options.requestId, askUserResponse);
+          getMcpRuntime().resolveAskUser(options.requestId, askUserResponse);
         }
 
         const runtime = getCoworkEngineRouter();
@@ -8725,6 +8731,7 @@ end tell'`,
 
     // 处理渲染进程崩溃或退出
     mainWindow.webContents.on('render-process-gone', (_event, details) => {
+      authCallbackRouter.markRendererUnavailable();
       console.error('Window render process gone:', details);
       scheduleReload('webContents-crashed');
     });
@@ -8774,14 +8781,14 @@ end tell'`,
         }
       },
     );
-    mainWindow.webContents.on('did-start-loading', () => {
-      authCallbackListenerReady = false;
+    mainWindow.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+      authCallbackRouter.handleNavigationStarted({ isMainFrame, isInPlace });
     });
 
     // 当窗口关闭时，清除引用
     mainWindow.on('closed', () => {
       windowStatePersist.cleanup();
-      authCallbackListenerReady = false;
+      authCallbackRouter.markRendererUnavailable();
       mainWindow = null;
     });
 
@@ -9102,7 +9109,7 @@ end tell'`,
     if (enterpriseConfigPath) {
       try {
         const imStoreInstance = getIMGatewayManager().getIMStore();
-        const mcpStoreInstance = getMcpStore();
+        const mcpStoreInstance = getMcpRuntime().getStore();
         syncEnterpriseConfig(
           enterpriseConfigPath,
           store,
@@ -9371,21 +9378,11 @@ end tell'`,
 
     console.log(profiler.summary());
 
-    // Windows/Linux cold start: parse deep link from process.argv
-    // Always buffer since renderer is not ready yet after createWindow()
+    // Windows/Linux cold start: parse deep link from process.argv.
+    // The router buffers it because the renderer is not ready yet after createWindow().
     const coldStartDeepLink = process.argv.find(arg => arg.startsWith('lobsterai://'));
     if (coldStartDeepLink) {
-      try {
-        const parsed = new URL(coldStartDeepLink);
-        if (parsed.hostname === 'auth' && parsed.pathname === '/callback') {
-          const code = parsed.searchParams.get('code');
-          if (code) {
-            pendingAuthCode = code;
-          }
-        }
-      } catch (e) {
-        console.error('[Main] Failed to parse cold-start deep link:', e);
-      }
+      handleDeepLink(coldStartDeepLink);
     }
 
     // Auto-reconnect IM bots that were enabled before restart

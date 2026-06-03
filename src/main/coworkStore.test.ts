@@ -411,6 +411,36 @@ test('forkSession copies stable history and records fork metadata', () => {
   ]);
 });
 
+test('forkSession remaps selected text source message ids', () => {
+  const sid = 'sess-fork-selected-text';
+  insertSession(sid);
+  insertMessage('msg-assistant-source', sid, 'assistant', 'source answer', null, 1, 1000);
+  insertMessage(
+    'msg-user-selected-text',
+    sid,
+    'user',
+    'follow up',
+    JSON.stringify({
+      selectedTextSnippets: [{
+        id: 'snippet-1',
+        text: 'source answer',
+        sourceMessageId: 'msg-assistant-source',
+        sourceMessageType: 'assistant',
+        createdAt: 2000,
+      }],
+    }),
+    2,
+    2000,
+  );
+
+  const fork = store.forkSession({
+    sourceSessionId: sid,
+    forkedFromMessageId: 'msg-user-selected-text',
+  });
+
+  expect(fork.messages[1].metadata?.selectedTextSnippets?.[0].sourceMessageId).toBe(fork.messages[0].id);
+});
+
 test('forkSession can persist hidden compaction bridge messages', () => {
   const sid = 'sess-fork-compacted-source';
   insertSession(sid);

@@ -693,6 +693,7 @@ class CoworkService {
       imageAttachments: options.imageAttachments,
       mediaSelection: options.mediaSelection,
       mediaReferences: options.mediaReferences,
+      selectedTextSnippets: options.selectedTextSnippets,
     });
     if (!result.success) {
       store.dispatch(setStreaming(false));

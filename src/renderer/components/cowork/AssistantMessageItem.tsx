@@ -125,6 +125,7 @@ const AssistantMessageItem: React.FC<{
   return (
     <div
       className="relative focus:outline-none"
+      data-cowork-assistant-message-id={message.id}
       tabIndex={showCopyButton ? 0 : undefined}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={handleMouseLeave}

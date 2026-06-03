@@ -1,5 +1,6 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
 
+import type { CoworkSelectedTextSnippet } from '../../../shared/cowork/selectedText';
 import {
   type CoworkConfig,
   type CoworkContextUsage,
@@ -29,6 +30,8 @@ interface CoworkState {
   draftPrompts: Record<string, string>;
   /** Keyed by draftKey (sessionId or '__home__'), stores pending attachments */
   draftAttachments: Record<string, DraftAttachment[]>;
+  /** Keyed by draftKey, stores selected assistant text excerpts for the next user turn. */
+  draftSelectedTextSnippets: Record<string, CoworkSelectedTextSnippet[]>;
   /** Keyed by draftKey, stores active kit IDs per draft so they survive view switches */
   draftKitIds: Record<string, string[]>;
   /** Keyed by draftKey, stores active skill IDs per draft so they survive view switches */
@@ -57,6 +60,7 @@ const initialState: CoworkState = {
   currentSession: null,
   draftPrompts: {},
   draftAttachments: {},
+  draftSelectedTextSnippets: {},
   draftKitIds: {},
   draftSkillIds: {},
   unreadSessionIds: [],
@@ -604,6 +608,36 @@ const coworkSlice = createSlice({
       delete state.draftAttachments[action.payload];
     },
 
+    setDraftSelectedTextSnippets(state, action: PayloadAction<{ draftKey: string; snippets: CoworkSelectedTextSnippet[] }>) {
+      const { draftKey, snippets } = action.payload;
+      if (snippets.length === 0) {
+        delete state.draftSelectedTextSnippets[draftKey];
+      } else {
+        state.draftSelectedTextSnippets[draftKey] = snippets;
+      }
+    },
+
+    addDraftSelectedTextSnippet(state, action: PayloadAction<{ draftKey: string; snippet: CoworkSelectedTextSnippet }>) {
+      const { draftKey, snippet } = action.payload;
+      const existing = state.draftSelectedTextSnippets[draftKey] || [];
+      state.draftSelectedTextSnippets[draftKey] = [...existing, snippet];
+    },
+
+    removeDraftSelectedTextSnippet(state, action: PayloadAction<{ draftKey: string; snippetId: string }>) {
+      const { draftKey, snippetId } = action.payload;
+      const snippets = (state.draftSelectedTextSnippets[draftKey] || [])
+        .filter(snippet => snippet.id !== snippetId);
+      if (snippets.length === 0) {
+        delete state.draftSelectedTextSnippets[draftKey];
+      } else {
+        state.draftSelectedTextSnippets[draftKey] = snippets;
+      }
+    },
+
+    clearDraftSelectedTextSnippets(state, action: PayloadAction<string>) {
+      delete state.draftSelectedTextSnippets[action.payload];
+    },
+
     setDraftKitIds(state, action: PayloadAction<{ draftKey: string; kitIds: string[] }>) {
       const { draftKey, kitIds } = action.payload;
       if (kitIds.length === 0) {
@@ -648,6 +682,10 @@ export const {
   setDraftAttachments,
   addDraftAttachment,
   clearDraftAttachments,
+  setDraftSelectedTextSnippets,
+  addDraftSelectedTextSnippet,
+  removeDraftSelectedTextSnippet,
+  clearDraftSelectedTextSnippets,
   addSession,
   updateSessionStatus,
   deleteSession,

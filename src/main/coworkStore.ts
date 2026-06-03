@@ -14,6 +14,10 @@ import {
   CoworkForkMode,
   type CoworkForkMode as CoworkForkModeType,
 } from '../shared/cowork/constants';
+import {
+  type CoworkSelectedTextSnippet,
+  CoworkSelectedTextSource,
+} from '../shared/cowork/selectedText';
 import type {
   KitReference,
   ResolvedKitCapabilities,
@@ -400,6 +404,7 @@ export interface CoworkMessageMetadata {
   contextPercent?: number;
   model?: string;
   agentName?: string;
+  selectedTextSnippets?: CoworkSelectedTextSnippet[];
   [key: string]: unknown;
 }
 
@@ -862,6 +867,7 @@ export class CoworkStore {
     }
 
     const sourceMessages = this.getForkSourceMessages(options.sourceSessionId, messageLimitSequence);
+    const forkedMessageIds = new Map(sourceMessages.map(row => [row.id, uuidv4()]));
     const contextMessages = this.getForkContextMessages(
       options.sourceSessionId,
       options.contextMessages ?? [],
@@ -927,11 +933,11 @@ export class CoworkStore {
 
       for (const row of sourceMessages) {
         insertMessage.run(
-          uuidv4(),
+          forkedMessageIds.get(row.id) ?? uuidv4(),
           id,
           row.type,
           row.content,
-          this.sanitizeForkMessageMetadata(row.metadata),
+          this.sanitizeForkMessageMetadata(row.metadata, forkedMessageIds),
           row.created_at,
           row.sequence,
         );
@@ -1034,7 +1040,10 @@ export class CoworkStore {
     }
   }
 
-  private sanitizeForkMessageMetadata(metadataJson: string | null): string | null {
+  private sanitizeForkMessageMetadata(
+    metadataJson: string | null,
+    forkedMessageIds: Map<string, string>,
+  ): string | null {
     if (!metadataJson) return null;
     try {
       const metadata = JSON.parse(metadataJson) as CoworkMessageMetadata;
@@ -1048,6 +1057,17 @@ export class CoworkStore {
       delete sanitized.turnToken;
       delete sanitized.openClawRunId;
       delete sanitized.openClawSessionKey;
+      if (Array.isArray(sanitized.selectedTextSnippets)) {
+        sanitized.selectedTextSnippets = sanitized.selectedTextSnippets.map(snippet => ({
+          ...snippet,
+          ...(snippet.sourceMessageId && (snippet.sourceType ?? snippet.sourceMessageType) === CoworkSelectedTextSource.AssistantMessage
+            ? {
+              sourceMessageId: forkedMessageIds.get(snippet.sourceMessageId) ?? snippet.sourceMessageId,
+              sourceId: forkedMessageIds.get(snippet.sourceMessageId) ?? snippet.sourceId,
+            }
+            : {}),
+        }));
+      }
       return Object.keys(sanitized).length > 0 ? JSON.stringify(sanitized) : null;
     } catch {
       return null;
