@@ -3558,15 +3558,10 @@ const Settings: React.FC<SettingsProps> = ({
                       <button
                         type="button"
                         onClick={() => { void handleOpenClawDataBackup(); }}
-                        disabled={isBackingUpOpenClawData || isRestoringOpenClawData}
+                        disabled
                         className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 self-start rounded-lg border border-border bg-surface px-3 text-xs font-medium text-foreground transition-colors hover:bg-surface-raised disabled:cursor-not-allowed disabled:opacity-60 active:scale-[0.98] sm:self-auto"
                       >
-                        {isBackingUpOpenClawData && (
-                          <ArrowPathIcon className="h-3.5 w-3.5 animate-spin" />
-                        )}
-                        {isBackingUpOpenClawData
-                          ? i18nService.t('openClawDataBackupRunning')
-                          : i18nService.t('openClawDataBackupAction')}
+                        {i18nService.t('openClawMaintenanceComingSoon')}
                       </button>
                     </div>
 
@@ -3587,15 +3582,10 @@ const Settings: React.FC<SettingsProps> = ({
                       <button
                         type="button"
                         onClick={() => setShowOpenClawDataRestoreConfirm(true)}
-                        disabled={isBackingUpOpenClawData || isRestoringOpenClawData}
+                        disabled
                         className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 self-start rounded-lg border border-border bg-surface px-3 text-xs font-medium text-foreground transition-colors hover:bg-surface-raised disabled:cursor-not-allowed disabled:opacity-60 active:scale-[0.98] sm:self-auto"
                       >
-                        {isRestoringOpenClawData && (
-                          <ArrowPathIcon className="h-3.5 w-3.5 animate-spin" />
-                        )}
-                        {isRestoringOpenClawData
-                          ? i18nService.t('openClawDataMigrationRunning')
-                          : i18nService.t('openClawDataMigrationAction')}
+                        {i18nService.t('openClawMaintenanceComingSoon')}
                       </button>
                     </div>
                   </div>
