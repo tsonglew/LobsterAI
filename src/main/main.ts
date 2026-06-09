@@ -2293,8 +2293,21 @@ const getTaskCompletionNotifier = (): TaskCompletionNotifier => {
         getStore().get<AppConfigSettings>('app_config')?.notificationSettings,
       focusMainWindow: focusMainWindowForReason,
       openSession: (sessionId: string) => {
-        if (!mainWindow || mainWindow.isDestroyed()) return;
-        mainWindow.webContents.send(CoworkIpcChannel.OpenSessionFromNotification, { sessionId });
+        const targetWindow = mainWindow && !mainWindow.isDestroyed()
+          ? mainWindow
+          : ensureMainWindowForReason?.('task completion notification') ?? null;
+        if (!targetWindow || targetWindow.isDestroyed()) {
+          console.warn(`[TaskCompletionNotifier] could not open session ${sessionId} because no main window was available`);
+          return;
+        }
+
+        pendingOpenSessionFromNotificationId = sessionId;
+        if (targetWindow.webContents.isLoadingMainFrame()) {
+          targetWindow.webContents.once('did-finish-load', flushOpenSessionFromNotification);
+          return;
+        }
+
+        flushOpenSessionFromNotification();
       },
       updateTrayReminder: (count: number, onClick?: () => void) => {
         updateTrayReminder(() => mainWindow, { count, onClick });
@@ -2653,13 +2666,33 @@ const getNotificationIconPath = (): string | null => {
 // 保存对主窗口的引用
 let mainWindow: BrowserWindow | null = null;
 let taskCompletionNotifier: TaskCompletionNotifier | null = null;
+let ensureMainWindowForReason: ((reason: string) => BrowserWindow | null) | null = null;
+let isOpenSessionFromNotificationReady = false;
+let pendingOpenSessionFromNotificationId: string | null = null;
+
+const flushOpenSessionFromNotification = (): void => {
+  if (!pendingOpenSessionFromNotificationId || !isOpenSessionFromNotificationReady) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.webContents.isLoadingMainFrame()) return;
+
+  const sessionId = pendingOpenSessionFromNotificationId;
+  pendingOpenSessionFromNotificationId = null;
+  console.log(`[TaskCompletionNotifier] opening session ${sessionId} from notification`);
+  mainWindow.webContents.send(CoworkIpcChannel.OpenSessionFromNotification, { sessionId });
+};
 
 const focusMainWindowForReason = (reason: string): void => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const targetWindow = mainWindow && !mainWindow.isDestroyed()
+    ? mainWindow
+    : ensureMainWindowForReason?.(reason) ?? null;
+  if (!targetWindow || targetWindow.isDestroyed()) {
+    console.warn(`[Main] no main window was available after ${reason}`);
+    return;
+  }
   try {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    if (!mainWindow.isVisible()) mainWindow.show();
-    if (!mainWindow.isFocused()) mainWindow.focus();
+    if (targetWindow.isMinimized()) targetWindow.restore();
+    if (!targetWindow.isVisible()) targetWindow.show();
+    if (!targetWindow.isFocused()) targetWindow.focus();
     if (process.platform === 'darwin') {
       app.focus({ steal: true });
     }
@@ -5537,6 +5570,18 @@ if (!gotTheLock) {
         error: error instanceof Error ? error.message : 'Failed to mark session viewed',
       };
     }
+  });
+
+  ipcMain.handle(CoworkIpcChannel.OpenSessionFromNotificationReady, async event => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender.id !== mainWindow.webContents.id) {
+      console.warn('[TaskCompletionNotifier] ignored notification open readiness from an unknown renderer');
+      return { success: false, error: 'Unknown renderer' };
+    }
+
+    isOpenSessionFromNotificationReady = true;
+    console.log('[TaskCompletionNotifier] renderer is ready to open sessions from notifications');
+    flushOpenSessionFromNotification();
+    return { success: true };
   });
 
   ipcMain.handle('cowork:session:delete', async (_event, sessionId: string) => {
@@ -8845,12 +8890,14 @@ if (!gotTheLock) {
   // 创建主窗口
   const createWindow = () => {
     // 如果窗口已经存在，就不再创建新窗口
-    if (mainWindow) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       if (!mainWindow.isVisible()) mainWindow.show();
       if (!mainWindow.isFocused()) mainWindow.focus();
       return;
     }
+    mainWindow = null;
+    isOpenSessionFromNotificationReady = false;
 
     const initialWindowState = resolveInitialAppWindowState(
       getStore().get(AppWindowStoreKey.State),
@@ -9058,6 +9105,9 @@ if (!gotTheLock) {
       },
     );
     mainWindow.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+      if (isMainFrame && !isInPlace) {
+        isOpenSessionFromNotificationReady = false;
+      }
       authCallbackRouter.handleNavigationStarted({ isMainFrame, isInPlace });
     });
 
@@ -9065,6 +9115,7 @@ if (!gotTheLock) {
     mainWindow.on('closed', () => {
       windowStatePersist.cleanup();
       authCallbackRouter.markRendererUnavailable();
+      isOpenSessionFromNotificationReady = false;
       mainWindow = null;
     });
 
@@ -9114,6 +9165,13 @@ if (!gotTheLock) {
         });
       })();
     });
+  };
+
+  ensureMainWindowForReason = (reason: string): BrowserWindow | null => {
+    if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
+    console.log(`[Main] recreating main window after ${reason}`);
+    createWindow();
+    return mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
   };
 
   let isCleanupFinished = false;

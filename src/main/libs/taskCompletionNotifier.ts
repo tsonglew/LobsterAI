@@ -108,9 +108,6 @@ export class TaskCompletionNotifier {
         this.activeNotifications.delete(sessionId);
         this.openPendingSession(sessionId);
       });
-      notification.on('close', () => {
-        this.activeNotifications.delete(sessionId);
-      });
       this.activeNotifications.set(sessionId, notification);
       this.pruneActiveNotificationReferences();
       notification.show();
