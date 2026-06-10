@@ -261,6 +261,7 @@ test('createMigrationArchive excludes cache and log data and writes a manifest',
 
   writeFile(path.join(userData, 'Cache', 'cache.bin'), 'cache');
   writeFile(path.join(userData, 'Code Cache', 'code.bin'), 'code-cache');
+  writeFile(path.join(userData, 'Dictionaries', 'en-US-10-1.bdic'), 'dictionary');
   writeFile(path.join(userData, 'GPUCache', 'gpu.bin'), 'gpu-cache');
   writeFile(path.join(userData, 'Local State'), 'local-state');
   writeFile(path.join(userData, 'Local Storage', 'leveldb', 'LOCK'), 'local-storage-lock');
@@ -275,8 +276,12 @@ test('createMigrationArchive excludes cache and log data and writes a manifest',
   writeFile(path.join(userData, 'Cookies'), 'cookies');
   writeFile(path.join(userData, 'DIPS-journal'), 'dips');
   writeFile(path.join(userData, '.com.github.Electron.test'), 'electron-marker');
+  writeFile(path.join(userData, 'install-timing.log'), 'install log');
+  writeFile(path.join(userData, 'skill-migrate.log'), 'skill migrate log');
   writeSqliteFixture(path.join(userData, DB_FILENAME), 'source');
   writeFile(path.join(userData, 'cowork', 'workspaces', 'session.txt'), 'workspace');
+  writeFile(path.join(userData, 'openclaw', 'logs', 'gateway-2026-06-10.log'), 'gateway log');
+  writeFile(path.join(userData, 'openclaw', 'state', 'logs', 'commands.log'), 'commands log');
   writeFile(path.join(userData, 'openclaw', 'mcp-packages', 'demo', 'node_modules', 'native.node'), 'native');
   writeOpenClawStateFixture(userData, 'source');
   writeFile(path.join(userData, 'runtimes', 'node', 'node.exe'), 'runtime');
@@ -292,15 +297,20 @@ test('createMigrationArchive excludes cache and log data and writes a manifest',
   expect(entries.some(entry => entry.includes('/Cache/'))).toBe(false);
   expect(entries.some(entry => entry.includes('/Code Cache/'))).toBe(false);
   expect(entries.some(entry => entry.includes('/cowork/'))).toBe(false);
+  expect(entries.some(entry => entry.includes('/Dictionaries/'))).toBe(false);
   expect(entries.some(entry => entry.includes('/GPUCache/'))).toBe(false);
   expect(entries.some(entry => entry.includes('/Local Storage/'))).toBe(false);
   expect(entries.some(entry => entry.includes('/Network/'))).toBe(false);
   expect(entries.some(entry => entry.includes('/Session Storage/'))).toBe(false);
   expect(entries.some(entry => entry.includes('/Shared Dictionary/'))).toBe(false);
   expect(entries.some(entry => entry.includes('/openclaw/mcp-packages/'))).toBe(false);
+  expect(entries.some(entry => entry.includes('/openclaw/logs/'))).toBe(false);
+  expect(entries.some(entry => entry.includes('/openclaw/state/logs/'))).toBe(false);
   expect(entries.some(entry => entry.includes('/backups/'))).toBe(false);
   expect(entries.some(entry => entry.includes('/logs/'))).toBe(false);
   expect(entries.some(entry => entry.includes('/runtimes/'))).toBe(false);
+  expect(entries.some(entry => entry.endsWith('/install-timing.log'))).toBe(false);
+  expect(entries.some(entry => entry.endsWith('/skill-migrate.log'))).toBe(false);
   expect(entries.some(entry => entry.endsWith('/Local State'))).toBe(false);
   expect(entries.some(entry => entry.endsWith('/Preferences'))).toBe(false);
   expect(entries.some(entry => entry.includes('/SharedStorage'))).toBe(false);
@@ -645,6 +655,9 @@ test('performPendingDataMigrationRestoreSync replaces data in place and preserve
   writeFile(path.join(sourceUserData, 'openclaw', 'state', 'openclaw.json'), '{"source":true}');
   writeFile(path.join(sourceUserData, 'backups', 'sqlite', 'snapshots', 'lobsterai-latest.sqlite'), 'source-backup');
   writeFile(path.join(sourceUserData, 'cowork', 'bin', 'node.cmd'), 'source-shim');
+  writeFile(path.join(sourceUserData, 'install-timing.log'), 'source-install-log');
+  writeFile(path.join(sourceUserData, 'skill-migrate.log'), 'source-skill-migrate-log');
+  writeFile(path.join(sourceUserData, 'Dictionaries', 'source.bdic'), 'source-dictionary');
   writeFile(path.join(sourceUserData, 'Local State'), 'source-local-state');
   writeFile(path.join(sourceUserData, 'Local Storage', 'leveldb', 'source.log'), 'source-local-storage');
   writeFile(path.join(sourceUserData, 'Network', 'Cookies'), 'source-network-cookies');
@@ -653,6 +666,8 @@ test('performPendingDataMigrationRestoreSync replaces data in place and preserve
   writeFile(path.join(sourceUserData, 'Shared Dictionary', 'source.dict'), 'source-dictionary');
   writeFile(path.join(sourceUserData, 'SharedStorage'), 'source-shared-storage');
   writeFile(path.join(sourceUserData, 'SharedStorage-wal'), 'source-shared-storage-wal');
+  writeFile(path.join(sourceUserData, 'openclaw', 'logs', 'gateway-2026-06-10.log'), 'source-gateway-log');
+  writeFile(path.join(sourceUserData, 'openclaw', 'state', 'logs', 'commands.log'), 'source-commands-log');
   writeFile(path.join(sourceUserData, 'openclaw', 'mcp-packages', 'demo', 'node_modules', 'native.node'), 'native');
   writeFile(path.join(sourceUserData, 'runtimes', 'python', 'python.exe'), 'source-runtime');
   writeFile(path.join(sourceUserData, `${DB_FILENAME}-wal`), 'source-wal');
@@ -663,6 +678,9 @@ test('performPendingDataMigrationRestoreSync replaces data in place and preserve
   writeFile(path.join(targetUserData, 'old-only.txt'), 'old');
   writeFile(path.join(targetUserData, 'backups', 'sqlite', 'snapshots', 'lobsterai-latest.sqlite'), 'target-backup');
   writeFile(path.join(targetUserData, 'cowork', 'bin', 'node.cmd'), 'target-shim');
+  writeFile(path.join(targetUserData, 'install-timing.log'), 'target-install-log');
+  writeFile(path.join(targetUserData, 'skill-migrate.log'), 'target-skill-migrate-log');
+  writeFile(path.join(targetUserData, 'Dictionaries', 'target.bdic'), 'target-dictionary');
   writeFile(path.join(targetUserData, 'Local State'), 'target-local-state');
   writeFile(path.join(targetUserData, 'Local Storage', 'leveldb', 'LOCK'), 'target-local-storage-lock');
   writeFile(path.join(targetUserData, 'Network', 'Cookies'), 'runtime-cookies');
@@ -671,15 +689,22 @@ test('performPendingDataMigrationRestoreSync replaces data in place and preserve
   writeFile(path.join(targetUserData, 'Shared Dictionary', 'target.dict'), 'target-dictionary');
   writeFile(path.join(targetUserData, 'SharedStorage'), 'target-shared-storage');
   writeFile(path.join(targetUserData, 'SharedStorage-wal'), 'target-shared-storage-wal');
+  writeFile(path.join(targetUserData, 'openclaw', 'logs', 'gateway-2026-06-10.log'), 'target-gateway-log');
+  writeFile(path.join(targetUserData, 'openclaw', 'state', 'logs', 'commands.log'), 'target-commands-log');
   writeFile(path.join(targetUserData, 'openclaw', 'mcp-packages', 'demo', 'node_modules', 'target-native.node'), 'target-native');
   writeFile(path.join(targetUserData, 'runtimes', 'python', 'python.exe'), 'target-runtime');
   writeFile(path.join(targetUserData, 'SingletonLock'), 'runtime-lock');
 
   createMigrationArchiveSync({ userDataPath: sourceUserData, outputPath: archivePath });
   const extractRoot = extractArchive(archivePath);
+  writeFile(path.join(extractRoot, 'LobsterAI', 'install-timing.log'), 'legacy-source-install-log');
+  writeFile(path.join(extractRoot, 'LobsterAI', 'skill-migrate.log'), 'legacy-source-skill-migrate-log');
+  writeFile(path.join(extractRoot, 'LobsterAI', 'Dictionaries', 'source.bdic'), 'legacy-source-dictionary');
   writeFile(path.join(extractRoot, 'LobsterAI', 'Local Storage', 'leveldb', 'source.log'), 'legacy-source-local-storage');
   writeFile(path.join(extractRoot, 'LobsterAI', 'Preferences'), 'legacy-source-preferences');
   writeFile(path.join(extractRoot, 'LobsterAI', 'Session Storage', 'leveldb', 'source.log'), 'legacy-source-session-storage');
+  writeFile(path.join(extractRoot, 'LobsterAI', 'openclaw', 'logs', 'gateway-2026-06-10.log'), 'legacy-source-gateway-log');
+  writeFile(path.join(extractRoot, 'LobsterAI', 'openclaw', 'state', 'logs', 'commands.log'), 'legacy-source-commands-log');
   tar.create({
     sync: true,
     gzip: true,
@@ -700,8 +725,13 @@ test('performPendingDataMigrationRestoreSync replaces data in place and preserve
   expect(rollbackEntries).toContain('LobsterAI/cowork/bin/node.cmd');
   expect(rollbackEntries).toContain('LobsterAI/openclaw/mcp-packages/demo/node_modules/target-native.node');
   expect(rollbackEntries).toContain('LobsterAI/runtimes/python/python.exe');
+  expect(rollbackEntries.some(entry => entry.includes('/Dictionaries/'))).toBe(false);
   expect(rollbackEntries.some(entry => entry.includes('/Local Storage/'))).toBe(false);
   expect(rollbackEntries.some(entry => entry.includes('/Network/'))).toBe(false);
+  expect(rollbackEntries.some(entry => entry.includes('/openclaw/logs/'))).toBe(false);
+  expect(rollbackEntries.some(entry => entry.includes('/openclaw/state/logs/'))).toBe(false);
+  expect(rollbackEntries.some(entry => entry.endsWith('/install-timing.log'))).toBe(false);
+  expect(rollbackEntries.some(entry => entry.endsWith('/skill-migrate.log'))).toBe(false);
   expect(readSqliteString(path.join(targetUserData, DB_FILENAME), 'SELECT value FROM kv WHERE key = ?', ['auth_tokens']))
     .toContain('source-refresh');
   expect(fs.readFileSync(path.join(targetUserData, 'openclaw', 'state', 'openclaw.json'), 'utf8')).toBe('{"source":true}');
@@ -712,6 +742,10 @@ test('performPendingDataMigrationRestoreSync replaces data in place and preserve
   expect(fs.existsSync(path.join(targetUserData, `${DB_FILENAME}-wal`))).toBe(false);
   expect(fs.existsSync(path.join(targetUserData, `${DB_FILENAME}-shm`))).toBe(false);
   expect(fs.existsSync(path.join(targetUserData, 'old-only.txt'))).toBe(false);
+  expect(fs.readFileSync(path.join(targetUserData, 'install-timing.log'), 'utf8')).toBe('target-install-log');
+  expect(fs.readFileSync(path.join(targetUserData, 'skill-migrate.log'), 'utf8')).toBe('target-skill-migrate-log');
+  expect(fs.readFileSync(path.join(targetUserData, 'Dictionaries', 'target.bdic'), 'utf8'))
+    .toBe('target-dictionary');
   expect(fs.readFileSync(path.join(targetUserData, 'Local State'), 'utf8')).toBe('target-local-state');
   expect(fs.readFileSync(path.join(targetUserData, 'Local Storage', 'leveldb', 'LOCK'), 'utf8'))
     .toBe('target-local-storage-lock');
@@ -723,6 +757,10 @@ test('performPendingDataMigrationRestoreSync replaces data in place and preserve
     .toBe('target-dictionary');
   expect(fs.readFileSync(path.join(targetUserData, 'SharedStorage'), 'utf8')).toBe('target-shared-storage');
   expect(fs.readFileSync(path.join(targetUserData, 'SharedStorage-wal'), 'utf8')).toBe('target-shared-storage-wal');
+  expect(fs.readFileSync(path.join(targetUserData, 'openclaw', 'logs', 'gateway-2026-06-10.log'), 'utf8'))
+    .toBe('target-gateway-log');
+  expect(fs.readFileSync(path.join(targetUserData, 'openclaw', 'state', 'logs', 'commands.log'), 'utf8'))
+    .toBe('target-commands-log');
   expect(fs.readFileSync(path.join(targetUserData, 'SingletonLock'), 'utf8')).toBe('runtime-lock');
 });
 
