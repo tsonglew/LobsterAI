@@ -72,6 +72,10 @@ const OPENCLAW_STATE_SUMMARY_EXCLUDED_SEGMENTS = new Set([
   'bin',
 ]);
 
+const OPENCLAW_STATE_SUMMARY_EXCLUDED_RELATIVE_PATHS = [
+  'logs',
+];
+
 const OPENCLAW_STATE_SUMMARY_EXCLUDED_FILE_NAMES = new Set([
   'gateway-port.json',
   'gateway-token',
@@ -81,6 +85,7 @@ const SOURCE_EXCLUDED_TOP_LEVEL_NAMES = new Set([
   'Cache',
   'Code Cache',
   'cowork',
+  'Dictionaries',
   'GPUCache',
   'DawnGraphiteCache',
   'DawnWebGPUCache',
@@ -99,10 +104,13 @@ const SOURCE_EXCLUDED_TOP_LEVEL_NAMES = new Set([
   'SingletonSocket',
   'blob_storage',
   'Crashpad',
+  'install-timing.log',
   SQLITE_BACKUP_TOP_LEVEL_DIR_NAME,
   'logs',
   'lockfile',
   'runtimes',
+  'skill-migrate.log',
+  'sqlite-backups',
   PENDING_RESTORE_FILE_NAME,
   LAST_RESTORE_RESULT_FILE_NAME,
 ]);
@@ -110,6 +118,8 @@ const SOURCE_EXCLUDED_TOP_LEVEL_NAMES = new Set([
 const RESTORE_PRESERVED_TOP_LEVEL_NAMES = new Set([
   'Cache',
   'Code Cache',
+  'cowork',
+  'Dictionaries',
   'GPUCache',
   'DawnGraphiteCache',
   'DawnWebGPUCache',
@@ -128,8 +138,13 @@ const RESTORE_PRESERVED_TOP_LEVEL_NAMES = new Set([
   'SingletonSocket',
   'blob_storage',
   'Crashpad',
+  'install-timing.log',
+  SQLITE_BACKUP_TOP_LEVEL_DIR_NAME,
   'logs',
   'lockfile',
+  'runtimes',
+  'skill-migrate.log',
+  'sqlite-backups',
   PENDING_RESTORE_FILE_NAME,
   LAST_RESTORE_RESULT_FILE_NAME,
 ]);
@@ -143,7 +158,15 @@ const SOURCE_EXCLUDED_TOP_LEVEL_PREFIXES = [
 const RESTORE_PRESERVED_TOP_LEVEL_PREFIXES = SOURCE_EXCLUDED_TOP_LEVEL_PREFIXES;
 
 const EXCLUDED_RELATIVE_PATHS = [
+  'openclaw/logs',
   'openclaw/mcp-packages',
+  'openclaw/state/logs',
+];
+
+const RESTORE_PRESERVED_RELATIVE_PATHS = [
+  'openclaw/logs',
+  'openclaw/mcp-packages',
+  'openclaw/state/logs',
 ];
 
 const ALLOWED_ENTRY_TYPES = new Set([
@@ -310,6 +333,17 @@ const isExcludedMigrationEntry = (relativePosixPath: string): boolean => {
   ));
 };
 
+const isPreservedRestoreRelativeEntry = (relativePosixPath: string): boolean => (
+  RESTORE_PRESERVED_RELATIVE_PATHS.some(preservedPath => (
+    relativePosixPath === preservedPath
+    || relativePosixPath.startsWith(`${preservedPath}/`)
+  ))
+);
+
+const hasPreservedRestoreRelativeDescendant = (relativePosixPath: string): boolean => (
+  RESTORE_PRESERVED_RELATIVE_PATHS.some(preservedPath => preservedPath.startsWith(`${relativePosixPath}/`))
+);
+
 const isTopLevelSqliteRestoreEntry = (relativePosixPath: string): boolean => {
   const firstSegment = relativePosixPath.split('/')[0] || '';
   return SQLITE_RESTORE_FILE_NAMES.includes(firstSegment as typeof SQLITE_RESTORE_FILE_NAMES[number]);
@@ -320,7 +354,7 @@ const getExclusionManifestFields = (archiveKind: DataMigrationArchiveKind): Reco
     return {
       excludedTopLevelNames: [...RESTORE_PRESERVED_TOP_LEVEL_NAMES].sort(),
       excludedTopLevelPrefixes: [...RESTORE_PRESERVED_TOP_LEVEL_PREFIXES].sort(),
-      excludedRelativePaths: [],
+      excludedRelativePaths: [...RESTORE_PRESERVED_RELATIVE_PATHS].sort(),
     };
   }
 
@@ -340,6 +374,7 @@ const shouldExcludeSourcePath = (
   const archiveKind = input.archiveKind ?? 'backup';
   if (archiveKind === 'rollback') {
     if (isPreservedRestoreTopLevelEntry(relativePosixPath)) return true;
+    if (isPreservedRestoreRelativeEntry(relativePosixPath)) return true;
   } else if (isExcludedMigrationEntry(relativePosixPath)) {
     return true;
   }
@@ -896,6 +931,12 @@ const shouldExcludeOpenClawStateSummaryPath = (relativePosixPath: string): boole
   if (segments.some(segment => OPENCLAW_STATE_SUMMARY_EXCLUDED_SEGMENTS.has(segment))) {
     return true;
   }
+  if (OPENCLAW_STATE_SUMMARY_EXCLUDED_RELATIVE_PATHS.some(excludedPath => (
+    relativePosixPath === excludedPath
+    || relativePosixPath.startsWith(`${excludedPath}/`)
+  ))) {
+    return true;
+  }
   const fileName = segments[segments.length - 1] ?? '';
   return OPENCLAW_STATE_SUMMARY_EXCLUDED_FILE_NAMES.has(fileName);
 };
@@ -1420,10 +1461,35 @@ const buildFailedRestoreResult = (
 
 const clearRestorableUserDataSync = (userDataPath: string): void => {
   ensureDirSync(userDataPath);
+  const clearEntry = (absolutePath: string, relativePosixPath: string): void => {
+    if (isPreservedRestoreTopLevelEntry(relativePosixPath)) return;
+    if (isPreservedRestoreRelativeEntry(relativePosixPath)) return;
+    if (isTopLevelSqliteRestoreEntry(relativePosixPath)) return;
+
+    if (hasPreservedRestoreRelativeDescendant(relativePosixPath)) {
+      const stat = fs.lstatSync(absolutePath);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        removeDirIfExistsSync(absolutePath);
+        return;
+      }
+
+      for (const entry of fs.readdirSync(absolutePath)) {
+        clearEntry(
+          path.join(absolutePath, entry),
+          `${relativePosixPath}/${entry}`,
+        );
+      }
+      if (fs.readdirSync(absolutePath).length === 0) {
+        removeDirIfExistsSync(absolutePath);
+      }
+      return;
+    }
+
+    removeDirIfExistsSync(absolutePath);
+  };
+
   for (const entry of fs.readdirSync(userDataPath)) {
-    if (isPreservedRestoreTopLevelEntry(entry)) continue;
-    if (isTopLevelSqliteRestoreEntry(entry)) continue;
-    removeDirIfExistsSync(path.join(userDataPath, entry));
+    clearEntry(path.join(userDataPath, entry), entry);
   }
 };
 
@@ -1502,16 +1568,19 @@ const invalidateMcpLaunchResolutionsSync = (dbPath: string): void => {
 const replaceRestorableUserDataSync = (
   sourceRoot: string,
   userDataPath: string,
-  shouldExcludeCopiedEntry = isExcludedMigrationEntry,
+  shouldExcludeCopiedEntry: (relativePosixPath: string, absolutePath: string) => boolean = (
+    relativePosixPath,
+  ) => isExcludedMigrationEntry(relativePosixPath),
   options: { includeSqliteSidecars?: boolean } = {},
 ): void => {
   clearRestorableUserDataSync(userDataPath);
   copyDirectorySync(
     sourceRoot,
     userDataPath,
-    (relativePosixPath) => (
+    (relativePosixPath, absolutePath) => (
       isTopLevelSqliteRestoreEntry(relativePosixPath)
-      || shouldExcludeCopiedEntry(relativePosixPath)
+      || isPreservedRestoreRelativeEntry(relativePosixPath)
+      || shouldExcludeCopiedEntry(relativePosixPath, absolutePath)
     ),
   );
   replaceSqliteDatabaseSync(sourceRoot, userDataPath, {
