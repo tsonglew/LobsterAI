@@ -780,14 +780,16 @@ class CoworkService {
     const cowork = window.electron?.cowork;
     if (!cowork) return false;
 
+    this.logDiagnostic('info', `stop requested for session ${sessionId}.`);
     const result = await cowork.stopSession(sessionId);
     if (result.success) {
       store.dispatch(setStreaming(false));
       store.dispatch(updateSessionStatus({ sessionId, status: 'idle' }));
+      this.logDiagnostic('info', `stop completed for session ${sessionId}.`);
       return true;
     }
 
-    console.error('Failed to stop session:', result.error);
+    this.logDiagnostic('warn', `stop failed for session ${sessionId}: ${result.error ?? 'Unknown error'}.`);
     return false;
   }
 

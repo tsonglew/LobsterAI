@@ -849,6 +849,29 @@ test('continueSession waits for an in-flight model patch before chat.send', asyn
   ]);
 });
 
+test('continueSession stopped before active turn creation does not send chat', async () => {
+  const {
+    adapter,
+    requests,
+    firstModelPatchStarted,
+    releaseFirstModelPatch,
+  } = createRunTurnAdapter({
+    holdFirstModelPatch: true,
+  });
+
+  const continuePromise = adapter.continueSession('session-1', 'hello');
+  await firstModelPatchStarted;
+
+  adapter.stopSession('session-1');
+  releaseFirstModelPatch();
+  await continuePromise;
+
+  expect(requests.map((request) => request.method)).toEqual(['sessions.patch']);
+  expect(adapter.isSessionActive('session-1')).toBe(false);
+  expect((adapter as unknown as { stoppedSessions: Map<string, number> }).stoppedSessions.has('session-1')).toBe(false);
+  expect((adapter as unknown as { manuallyStoppedSessions: Set<string> }).manuallyStoppedSessions.has('session-1')).toBe(false);
+});
+
 test('continueSession sends the session cwd to OpenClaw chat.send', async () => {
   const { adapter, requests } = createRunTurnAdapter({
     sessionCwd: '/tmp/lobsterai-selected-project',
