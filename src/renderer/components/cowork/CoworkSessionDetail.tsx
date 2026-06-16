@@ -1,4 +1,5 @@
 import {
+  ArrowDownIcon,
   DocumentArrowDownIcon,
   PhotoIcon,
 } from '@heroicons/react/24/outline';
@@ -89,6 +90,7 @@ interface CoworkSessionDetailProps {
 const AUTO_SCROLL_THRESHOLD = 120;
 const NAV_SCROLL_LOCK_DURATION = 800;
 const NAV_BOTTOM_SNAP_THRESHOLD = 20;
+const WHEEL_DELTA_LINE_HEIGHT = 16;
 const ARTIFACT_PANEL_TRANSITION_MS = 200;
 const ARTIFACT_PANEL_RESIZE_HANDLE_WIDTH = 4;
 const COWORK_DETAIL_MIN_WIDTH = 480;
@@ -2298,6 +2300,43 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
   }, [currentSession?.id, currentSession?.messagesOffset]);
 
+  const handleScrollToBottom = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const prefersReducedMotion = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    console.debug(
+      `[CoworkSessionDetail] scroll to bottom requested for session ${currentSession?.id ?? 'unknown'}; distance was ${Math.max(0, Math.round(distanceToBottom))}px.`,
+    );
+    if (prefersReducedMotion) {
+      setShouldAutoScroll(true);
+    }
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior: prefersReducedMotion ? 'auto' : 'smooth',
+    });
+    const lastRail = railItemCountRef.current > 0 ? railItemCountRef.current - 1 : -1;
+    currentRailIndexRef.current = lastRail;
+    setCurrentRailIndex(lastRail);
+  }, [currentSession?.id]);
+
+  const handleScrollToBottomWheel = useCallback((event: React.WheelEvent<HTMLButtonElement>) => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const deltaMultiplier = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+      ? WHEEL_DELTA_LINE_HEIGHT
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+        ? container.clientHeight
+        : 1;
+    event.preventDefault();
+    container.scrollBy({
+      left: event.deltaX * deltaMultiplier,
+      top: event.deltaY * deltaMultiplier,
+      behavior: 'auto',
+    });
+  }, []);
+
   // Auto-load older messages if content doesn't fill the container (no scrollbar = onScroll never fires)
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -2580,6 +2619,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     : 0;
   const artifactPanelInnerWidth = artifactPanelIsOverlay ? '100%' : artifactPanelFrameWidth;
   const shouldShowTurnNavigationRail = turns.length > 1 && isScrollable;
+  const shouldShowScrollToBottom = isScrollable && !shouldAutoScroll;
   const expandedConversationPreview = getExpandedConversationPreview(currentSession.messages);
 
   const renderConversationTurns = () => {
@@ -3260,6 +3300,18 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             </div>
           </div>,
           document.body
+        )}
+        {shouldShowScrollToBottom && (
+          <button
+            type="button"
+            onClick={handleScrollToBottom}
+            onWheel={handleScrollToBottomWheel}
+            className="absolute bottom-4 left-1/2 z-20 inline-flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-foreground/85 shadow-[0_2px_10px_rgba(15,23,42,0.12)] transition-colors hover:bg-surface-raised hover:text-foreground dark:shadow-[0_2px_14px_rgba(0,0,0,0.36)]"
+            aria-label={i18nService.t('coworkScrollToBottom')}
+            title={i18nService.t('coworkScrollToBottom')}
+          >
+            <ArrowDownIcon className="h-4 w-4 stroke-[2.1]" />
+          </button>
         )}
       </div>
 

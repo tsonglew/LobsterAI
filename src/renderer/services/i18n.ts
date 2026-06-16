@@ -1133,6 +1133,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkNewSession: '新会话',
     coworkDefaultSessionTitle: '新对话',
     coworkContinuePlaceholder: '继续对话...',
+    coworkScrollToBottom: '滚动到底部',
     coworkRemoteManagedPlaceholder: '该会话由 IM 通道创建，请在对应的 IM 平台操作',
     aiGeneratedDisclaimer: '内容由 AI 生成，仅供参考',
     updateAvailablePill: '有新版本',
@@ -3670,6 +3671,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkNewSession: 'New Session',
     coworkDefaultSessionTitle: 'New Chat',
     coworkContinuePlaceholder: 'Continue the conversation...',
+    coworkScrollToBottom: 'Scroll to bottom',
     coworkRemoteManagedPlaceholder:
       'This session was created via IM. Please use the corresponding IM platform.',
     aiGeneratedDisclaimer: 'AI-generated for reference only.',
