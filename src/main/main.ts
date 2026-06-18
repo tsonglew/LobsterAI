@@ -72,7 +72,6 @@ import {
   HtmlShareAccessMode,
   type HtmlShareAccessMode as HtmlShareAccessModeValue,
   type HtmlShareConfigurableStatus,
-  HtmlShareErrorCode,
   HtmlShareIpc,
   HtmlShareSourceType,
   HtmlShareStatus,
@@ -462,9 +461,12 @@ function sanitizeArtifactFileShareSourceType(value: unknown): ArtifactFileShareS
   const sourceType = sanitizeHtmlShareString(value, 'sourceType', 32);
   if (
     sourceType !== HtmlShareSourceType.ImageFile &&
-    sourceType !== HtmlShareSourceType.SvgFile
+    sourceType !== HtmlShareSourceType.SvgFile &&
+    sourceType !== HtmlShareSourceType.DocumentFile &&
+    sourceType !== HtmlShareSourceType.MarkdownFile &&
+    sourceType !== HtmlShareSourceType.MermaidFile
   ) {
-    throw new Error('sourceType must be image_file or svg_file.');
+    throw new Error('sourceType must be image_file, svg_file, document_file, markdown_file, or mermaid_file.');
   }
   return sourceType;
 }
@@ -4896,9 +4898,6 @@ if (!gotTheLock) {
     let archivePath: string | undefined;
     try {
       const options = sanitizeUpdateFromHtmlFileInput(input);
-      if (options.currentStatus === HtmlShareStatus.Disabled) {
-        return { success: false, code: HtmlShareErrorCode.DisabledCannotUpdate };
-      }
       const clientSourceKey = buildHtmlShareClientSourceKey(options.filePath);
       const packaged = await packageHtmlFile(options.filePath);
       archivePath = packaged.archivePath;
@@ -5024,9 +5023,6 @@ if (!gotTheLock) {
     let archivePath: string | undefined;
     try {
       const options = sanitizeUpdateFromArtifactFileInput(input);
-      if (options.currentStatus === HtmlShareStatus.Disabled) {
-        return { success: false, code: HtmlShareErrorCode.DisabledCannotUpdate };
-      }
       const clientSourceKey = buildArtifactShareClientSourceKey(options);
       const packaged = await packageArtifactFile({
         sourceType: options.sourceType,
@@ -6230,16 +6226,28 @@ if (!gotTheLock) {
 
   ipcMain.handle(
     'cowork:session:list',
-    async (_event, options?: { limit?: number; offset?: number; agentId?: string }) => {
+    async (_event, options?: { limit?: number; offset?: number; agentId?: string; searchQuery?: string }) => {
       try {
         const limit = options?.limit ?? COWORK_SESSION_PAGE_SIZE;
         const offset = options?.offset ?? 0;
         const agentId = options?.agentId;
+        const searchQuery = options?.searchQuery?.trim() ?? '';
         const store = getCoworkStore();
-        const sessions = store.listSessions(limit, offset, agentId);
-        const total = store.countSessions(agentId);
+        const startedAt = searchQuery ? Date.now() : 0;
+        const sessions = searchQuery
+          ? store.searchSessions({ query: searchQuery, limit, offset, agentId })
+          : store.listSessions(limit, offset, agentId);
+        const total = searchQuery
+          ? store.countSearchSessions({ query: searchQuery, agentId })
+          : store.countSessions(agentId);
+        if (searchQuery) {
+          console.debug(
+            `[CoworkIPC] searched sessions; query length ${searchQuery.length}, returned ${sessions.length} of ${total} from offset ${offset} in ${Date.now() - startedAt}ms.`,
+          );
+        }
         return { success: true, sessions, hasMore: offset + sessions.length < total };
       } catch (error) {
+        console.error('[CoworkIPC] failed to list sessions:', error);
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to list sessions',
@@ -9298,10 +9306,10 @@ if (!gotTheLock) {
           ? `script-src 'self' 'unsafe-inline' http://localhost:${devPort} ws://localhost:${devPort}`
           : "script-src 'self'",
         "style-src 'self' 'unsafe-inline' https:",
-        `img-src 'self' data: https: http: ${ArtifactPreviewProtocol.LocalFile}:`,
+        `img-src 'self' data: blob: https: http: ${ArtifactPreviewProtocol.LocalFile}:`,
         // 允许连接到所有域名，不做限制
         'connect-src *',
-        "font-src 'self' data: https:",
+        "font-src 'self' data: blob: https:",
         `media-src 'self' data: blob: file: https: http: ${ArtifactPreviewProtocol.LocalFile}:`,
         "worker-src 'self' blob:",
         "frame-src 'self' file: http://127.0.0.1:*",

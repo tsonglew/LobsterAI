@@ -57,7 +57,8 @@ const shouldPreferArtifact = (candidate: Artifact, current: Artifact): boolean =
   if (!currentHasFileProtocol && current.filePath && candidateHasFileProtocol) return false;
   if (!current.remoteUrl && candidate.remoteUrl) return true;
   if (!current.content && candidate.content) return true;
-  return false;
+  if (candidate.createdAt !== current.createdAt) return candidate.createdAt > current.createdAt;
+  return true;
 };
 
 export function dedupeArtifactsForDisplay(artifacts: Artifact[]): Artifact[] {
@@ -66,6 +67,55 @@ export function dedupeArtifactsForDisplay(artifacts: Artifact[]): Artifact[] {
 
   for (const artifact of artifacts) {
     const keys = getArtifactIdentityKeys(artifact);
+    const existingIndex = keys
+      .map(key => keyToIndex.get(key))
+      .find((index): index is number => index !== undefined);
+
+    if (existingIndex === undefined) {
+      const nextIndex = result.length;
+      result.push(artifact);
+      for (const key of keys) {
+        keyToIndex.set(key, nextIndex);
+      }
+      continue;
+    }
+
+    if (shouldPreferArtifact(artifact, result[existingIndex])) {
+      result[existingIndex] = artifact;
+    }
+    for (const key of keys) {
+      keyToIndex.set(key, existingIndex);
+    }
+  }
+
+  return result;
+}
+
+export function resolveArtifactIdForDisplay(artifacts: Artifact[], artifactId: string): string {
+  const target = artifacts.find(artifact => artifact.id === artifactId);
+  if (!target) return artifactId;
+
+  const displayArtifacts = dedupeArtifactsForDisplay(artifacts);
+  if (displayArtifacts.some(artifact => artifact.id === artifactId)) {
+    return artifactId;
+  }
+
+  const targetKeys = new Set(getArtifactIdentityKeys(target));
+  if (targetKeys.size === 0) return artifactId;
+
+  const displayArtifact = displayArtifacts.find(artifact =>
+    getArtifactIdentityKeys(artifact).some(key => targetKeys.has(key))
+  );
+
+  return displayArtifact?.id ?? artifactId;
+}
+
+export function dedupeArtifactsWithinMessages(artifacts: Artifact[]): Artifact[] {
+  const result: Artifact[] = [];
+  const keyToIndex = new Map<string, number>();
+
+  for (const artifact of artifacts) {
+    const keys = getArtifactIdentityKeys(artifact).map(key => `${artifact.messageId}:${key}`);
     const existingIndex = keys
       .map(key => keyToIndex.get(key))
       .find((index): index is number => index !== undefined);

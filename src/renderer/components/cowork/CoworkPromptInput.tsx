@@ -1,5 +1,6 @@
 import { CheckIcon, ChevronDownIcon, ChevronRightIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import { ArrowUpIcon, FolderIcon } from '@heroicons/react/24/solid';
+import { AuthSubscriptionStatus } from '@shared/auth/constants';
 import { ProviderName } from '@shared/providers';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
@@ -13,11 +14,18 @@ import type { CoworkSelectedTextSnippet } from '../../../shared/cowork/selectedT
 import { agentService } from '../../services/agent';
 import { configService } from '../../services/config';
 import { coworkService } from '../../services/cowork';
+import { getPortalPricingUrl } from '../../services/endpoints';
 import { i18nService } from '../../services/i18n';
 import { getInstalledKitSkillIds } from '../../services/kitCapability';
 import { skillService } from '../../services/skill';
 import { RootState } from '../../store';
 import { selectDraftPrompts } from '../../store/selectors/coworkSelectors';
+import {
+  AsrQuotaStatus,
+  ensureAsrQuotaFreshForDay,
+  getLocalAsrQuotaDayKey,
+  resetAsrQuota,
+} from '../../store/slices/asrQuotaSlice';
 import {
   addDraftAttachment,
   clearDraftAttachments,
@@ -42,6 +50,7 @@ import { toOpenClawModelRef } from '../../utils/openclawModelRef';
 import { getCompactFolderName } from '../../utils/path';
 import AgentAvatarIcon from '../agent/AgentAvatarIcon';
 import type { BrowserAnnotationPayload } from '../artifacts';
+import Modal from '../common/Modal';
 import DefaultAgentIcon from '../icons/DefaultAgentIcon';
 import PaperClipIcon from '../icons/PaperClipIcon';
 import PromptAddIcon from '../icons/PromptAddIcon';
@@ -78,6 +87,7 @@ import { usePersistAgentModelSelection } from './usePersistAgentModelSelection';
 import { useCoworkVoiceInput } from './voiceInput/useCoworkVoiceInput';
 import VoiceInputButton from './voiceInput/VoiceInputButton';
 import VoiceInputRecordingStatus from './voiceInput/VoiceInputRecordingStatus';
+import { getCoworkVoiceRecordingUiState } from './voiceInput/voiceInputUiState';
 
 const logPromptModelSelection = (
   level: 'debug' | 'warn',
@@ -89,6 +99,13 @@ const logPromptModelSelection = (
     console.debug(`[CoworkPromptInput] ${message}`);
   }
   window.electron?.log?.fromRenderer?.(level, 'CoworkPromptInput', message);
+};
+
+const summarizePromptShape = (prompt: string): string => {
+  const lines = prompt.length > 0 ? prompt.split('\n') : [];
+  const blankLines = lines.filter(line => line.trim().length === 0).length;
+  const orderedListLines = lines.filter(line => /^\s*\d+\.\s+/.test(line)).length;
+  return `chars=${prompt.length}, lines=${lines.length}, blankLines=${blankLines}, orderedListLines=${orderedListLines}`;
 };
 
 // CoworkAttachment is aliased from the Redux-persisted DraftAttachment type
@@ -119,6 +136,18 @@ const extractBase64FromDataUrl = (dataUrl: string): { mimeType: string; base64Da
 
 const showToast = (message: string): void => {
   window.dispatchEvent(new CustomEvent('app:showToast', { detail: message }));
+};
+
+const DEFAULT_FREE_ASR_LIMIT_SECONDS = 20 * 60;
+const DEFAULT_SUBSCRIBED_ASR_LIMIT_SECONDS = 200 * 60;
+
+const formatVoiceInputQuotaLimit = (seconds: number): string => {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  if (safeSeconds >= 3600 && safeSeconds % 3600 === 0) {
+    return i18nService.t('voiceInputQuotaHours').replace('{count}', `${safeSeconds / 3600}`);
+  }
+  const minutes = Math.max(1, Math.ceil(safeSeconds / 60));
+  return i18nService.t('voiceInputQuotaMinutes').replace('{count}', `${minutes}`);
 };
 
 const createImagePreviewDataUrl = async (dataUrl: string): Promise<string> => {
@@ -277,6 +306,8 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const availableModels = useSelector((state: RootState) => state.model.availableModels);
     const currentSession = useSelector((state: RootState) => state.cowork.currentSession);
     const isLoggedIn = useSelector((state: RootState) => state.auth.isLoggedIn);
+    const authQuota = useSelector((state: RootState) => state.auth.quota);
+    const asrQuota = useSelector((state: RootState) => state.asrQuota);
     const [value, setValue] = useState(draftPrompt);
     const [showFolderMenu, setShowFolderMenu] = useState(false);
     const [showFolderRequiredWarning, setShowFolderRequiredWarning] = useState(false);
@@ -295,6 +326,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const [showSkillsPopover, setShowSkillsPopover] = useState(false);
     const [modelAccessPrompt, setModelAccessPrompt] = useState<ModelAccessPromptKind | null>(null);
     const [showVoiceLoginPrompt, setShowVoiceLoginPrompt] = useState(false);
+    const [showVoiceQuotaPrompt, setShowVoiceQuotaPrompt] = useState(false);
 
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const addMenuButtonRef = useRef<HTMLButtonElement>(null);
@@ -459,6 +491,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
 
   const {
     handleVoiceInput,
+    stopVoiceRecordingAndRecognize,
     isVoiceRecording,
     isVoiceRecognizing,
     recordingElapsedSeconds,
@@ -471,17 +504,45 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     maxHeight,
     isLoggedIn,
     disabled,
-    isStreaming,
+    onQuotaExhausted: () => setShowVoiceQuotaPrompt(true),
   });
 
+  const isAsrSubscribed = authQuota?.subscriptionStatus === AuthSubscriptionStatus.Active;
+  const isAsrQuotaExhaustedToday = asrQuota.status === AsrQuotaStatus.Exhausted
+    && asrQuota.dayKey === getLocalAsrQuotaDayKey();
+  const voiceInputLocksEditing = isVoiceRecording || isVoiceRecognizing;
+
+  const ensureFreshAsrQuota = useCallback(() => {
+    dispatch(ensureAsrQuotaFreshForDay(getLocalAsrQuotaDayKey()));
+  }, [dispatch]);
+
+  useEffect(() => {
+    if (!isLoggedIn) {
+      dispatch(resetAsrQuota());
+      return;
+    }
+    ensureFreshAsrQuota();
+  }, [dispatch, ensureFreshAsrQuota, isLoggedIn]);
+
   const handleVoiceInputClick = useCallback(() => {
-    if (disabled || isStreaming) return;
+    if (isVoiceRecording) {
+      void handleVoiceInput();
+      return;
+    }
+    if (disabled) return;
     if (!isLoggedIn) {
       setShowVoiceLoginPrompt(true);
       return;
     }
+    const todayKey = getLocalAsrQuotaDayKey();
+    if (asrQuota.dayKey && asrQuota.dayKey !== todayKey) {
+      dispatch(ensureAsrQuotaFreshForDay(todayKey));
+    } else if (asrQuota.status === AsrQuotaStatus.Exhausted && asrQuota.dayKey === todayKey) {
+      setShowVoiceQuotaPrompt(true);
+      return;
+    }
     void handleVoiceInput();
-  }, [disabled, handleVoiceInput, isLoggedIn, isStreaming]);
+  }, [asrQuota.dayKey, asrQuota.status, disabled, dispatch, handleVoiceInput, isLoggedIn, isVoiceRecording]);
 
   // Load skills on mount
   useEffect(() => {
@@ -732,7 +793,14 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       return;
     }
 
-    const trimmedValue = value.trim();
+    let submitValue = value;
+    if (isVoiceRecording) {
+      const recognizedValue = await stopVoiceRecordingAndRecognize();
+      if (recognizedValue === null) return;
+      submitValue = recognizedValue;
+    }
+
+    const trimmedValue = submitValue.trim();
     if (isStreaming) {
       showToast(i18nService.t('coworkSessionStillRunning'));
       return;
@@ -858,6 +926,11 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       ? (attachmentLines ? `${trimmedValue}\n\n${attachmentLines}` : trimmedValue)
       : attachmentLines;
 
+    logPromptModelSelection(
+      'debug',
+      `submitting prompt summary: ${summarizePromptShape(finalPrompt)}, attachments=${attachments.length}, imageAttachments=${imageAtts.length}`
+    );
+
     if (imageAtts.length > 0) {
       console.log('[CoworkPromptInput] handleSubmit: passing imageAtts to onSubmit', {
         count: imageAtts.length,
@@ -884,7 +957,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     dispatch(clearDraftAttachments(draftKey));
     dispatch(clearDraftSelectedTextSnippets(draftKey));
     setImageVisionHint(false);
-  }, [value, isStreaming, disabled, isPatchingModel, onSubmit, activeSkillIds, skills, activeKitIds, marketplaceKits, installedKits, attachments, showFolderSelector, workingDirectory, dispatch, draftKey, effectiveSelectedModel?.id, modelSupportsImage, mediaLabels, selectedTextSnippets, resolveSubmitModelAccessPrompt]);
+  }, [value, isVoiceRecording, stopVoiceRecordingAndRecognize, isStreaming, disabled, isPatchingModel, onSubmit, activeSkillIds, skills, activeKitIds, marketplaceKits, installedKits, attachments, showFolderSelector, workingDirectory, dispatch, draftKey, effectiveSelectedModel?.id, modelSupportsImage, mediaLabels, selectedTextSnippets, resolveSubmitModelAccessPrompt]);
 
   const handleSelectSkill = useCallback((skill: Skill) => {
     dispatch(toggleActiveSkill(skill.id));
@@ -1132,7 +1205,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   }, [fileToBase64, workingDirectory]);
 
   const handleIncomingFiles = useCallback(async (fileList: FileList | File[]) => {
-    if (disabled || isStreaming) return;
+    if (disabled || isStreaming || voiceInputLocksEditing) return;
     const files = Array.from(fileList ?? []);
     if (files.length === 0) return;
 
@@ -1226,10 +1299,10 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     if (hasImageWithoutVision) {
       setImageVisionHint(true);
     }
-  }, [addAttachment, addImageAttachmentFromDataUrl, disabled, effectiveSelectedModel, fileToDataUrl, getNativeFilePath, isStreaming, modelSupportsImage, saveInlineFile]);
+  }, [addAttachment, addImageAttachmentFromDataUrl, disabled, effectiveSelectedModel, fileToDataUrl, getNativeFilePath, isStreaming, modelSupportsImage, saveInlineFile, voiceInputLocksEditing]);
 
   const handleAddFile = useCallback(async () => {
-    if (isAddingFile || disabled || isStreaming) return;
+    if (isAddingFile || disabled || isStreaming || voiceInputLocksEditing) return;
     setShowAddMenu(false);
     setIsAddingFile(true);
     try {
@@ -1271,7 +1344,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     } finally {
       setIsAddingFile(false);
     }
-  }, [addAttachment, effectiveSelectedModel, isAddingFile, disabled, isStreaming, modelSupportsImage]);
+  }, [addAttachment, effectiveSelectedModel, isAddingFile, disabled, isStreaming, modelSupportsImage, voiceInputLocksEditing]);
 
   const handleOpenAddMenu = useCallback(() => {
     setShowSkillsPopover(false);
@@ -1310,7 +1383,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     if (!hasFileTransfer(event.dataTransfer)) return;
     event.preventDefault();
     event.stopPropagation();
-    event.dataTransfer.dropEffect = disabled || isStreaming ? 'none' : 'copy';
+    event.dataTransfer.dropEffect = disabled || isStreaming || voiceInputLocksEditing ? 'none' : 'copy';
   };
 
   const handleDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
@@ -1329,19 +1402,19 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     event.stopPropagation();
     dragDepthRef.current = 0;
     setIsDraggingFiles(false);
-    if (disabled || isStreaming) return;
+    if (disabled || isStreaming || voiceInputLocksEditing) return;
     void handleIncomingFiles(event.dataTransfer.files);
   };
 
   const handlePaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (disabled || isStreaming) return;
+    if (disabled || isStreaming || voiceInputLocksEditing) return;
     const files = Array.from(event.clipboardData?.files ?? []);
     if (files.length === 0) return;
     event.preventDefault();
     void handleIncomingFiles(files);
-  }, [disabled, handleIncomingFiles, isStreaming]);
+  }, [disabled, handleIncomingFiles, isStreaming, voiceInputLocksEditing]);
 
-  const canSubmit = !disabled && !isPatchingModel && !agentModelIsInvalid && (!!value.trim() || hasAttachments);
+  const canSubmit = !disabled && !isVoiceRecognizing && !isPatchingModel && !agentModelIsInvalid && (!!value.trim() || hasAttachments);
   const enhancedContainerClass = isDraggingFiles
     ? `${containerClass} ring-2 ring-primary/50 border-primary/60`
     : containerClass;
@@ -1499,7 +1572,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
           <button
             type="button"
             onClick={handleAddFile}
-            disabled={disabled || isStreaming || isAddingFile}
+            disabled={disabled || isStreaming || isAddingFile || voiceInputLocksEditing}
             className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-raised disabled:cursor-not-allowed disabled:opacity-50"
             role="menuitem"
           >
@@ -1554,32 +1627,33 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       iconClassName={iconClassName}
       isLoggedIn={isLoggedIn}
       disabled={disabled}
-      isStreaming={isStreaming}
+      isQuotaExhausted={isAsrQuotaExhaustedToday}
       isRecording={isVoiceRecording}
       isRecognizing={isVoiceRecognizing}
       onClick={handleVoiceInputClick}
     />
   );
+  const hasPromptText = Boolean(value.trim());
+  const voiceRecordingUiState = getCoworkVoiceRecordingUiState({
+    isLarge,
+    isStreaming,
+    isVoiceRecording,
+  });
 
   const largeInputToolActions = (
     <div className="flex items-center gap-0.5">
       {largeInputActions}
-      <MediaModelPicker draftKey={draftKey} disabled={disabled} />
+      <MediaModelPicker draftKey={draftKey} disabled={disabled || voiceInputLocksEditing} />
     </div>
   );
   const largeSendButtonSizeClass = useCompactSendButton ? 'h-7 w-7' : 'h-8 w-8';
   const largeSendIconSizeClass = useCompactSendButton ? 'h-4 w-4' : 'h-[18px] w-[18px]';
   const largeVoiceInputButton = !remoteManaged ? renderVoiceInputButton(
-    `flex ${largeSendButtonSizeClass} shrink-0 items-center justify-center rounded-lg`,
+    `flex ${largeSendButtonSizeClass} shrink-0 items-center justify-center rounded-full`,
     largeSendIconSizeClass,
   ) : null;
-  const largeVoiceRecordingStatus = isVoiceRecording ? (
-    <div className="mx-1 hidden shrink-0 justify-end md:flex">
-      <VoiceInputRecordingStatus elapsedSeconds={recordingElapsedSeconds} />
-    </div>
-  ) : null;
 
-  const largeSendButton = isStreaming ? (
+  const largeTaskStopButton = (
     <button
       type="button"
       onClick={handleStopClick}
@@ -1589,13 +1663,16 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     >
       <TaskPauseIcon className="h-[34px] w-[34px]" aria-hidden="true" />
     </button>
-  ) : (
+  );
+
+  const canUseSubmitButton = canSubmit && !isStreaming;
+  const largeSubmitButton = (
     <button
       type="button"
       onClick={handleSubmit}
-      disabled={!canSubmit}
+      disabled={!canUseSubmitButton}
       className={`flex ${largeSendButtonSizeClass} items-center justify-center rounded-full transition-all ${
-        canSubmit
+        canUseSubmitButton
           ? 'bg-neutral-950 text-white shadow-subtle hover:bg-neutral-800 active:scale-95 dark:bg-white dark:text-neutral-950 dark:hover:bg-neutral-200'
           : 'cursor-not-allowed bg-neutral-300 text-white dark:bg-neutral-700 dark:text-neutral-500'
       }`}
@@ -1605,6 +1682,10 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       <ArrowUpIcon className={largeSendIconSizeClass} />
     </button>
   );
+
+  const largeSendButton = voiceRecordingUiState.showTaskStopButton
+    ? largeTaskStopButton
+    : largeSubmitButton;
 
   const attachmentPreviewContent = hasAttachments ? (
     <div className="flex flex-wrap gap-2">
@@ -1647,7 +1728,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     <div
       className={`flex cursor-text flex-wrap items-center gap-x-2 gap-y-1 px-4 ${isCompact ? 'pt-2' : 'pt-4'}`}
       onClick={() => {
-        if (!disabled) textareaRef.current?.focus();
+        if (!disabled && !voiceInputLocksEditing) textareaRef.current?.focus();
       }}
     >
       <ActiveSkillBadge />
@@ -1664,10 +1745,10 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   }: {
     rows: number;
     placeholder: string;
-    style?: React.CSSProperties;
-    wrapperClassName?: string;
-  }) => (
-    <div className={wrapperClassName}>
+        style?: React.CSSProperties;
+        wrapperClassName?: string;
+      }) => (
+        <div className={wrapperClassName}>
       {value && hasMediaMentionHighlight && (
         <div
           aria-hidden="true"
@@ -1698,24 +1779,24 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
           </div>
         </div>
       )}
-      <textarea
-        ref={textareaRef}
-        value={value}
+        <textarea
+          ref={textareaRef}
+          value={value}
         onChange={handleTextareaChange}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
         onScroll={handleTextareaScroll}
-        placeholder={textareaPlaceholderText}
-        disabled={disabled}
+        placeholder={voiceRecordingUiState.shouldHideInputPlaceholder ? '' : textareaPlaceholderText}
+        disabled={disabled || voiceInputLocksEditing}
         rows={rows}
         className={`${textareaClass} relative z-10`}
         style={{
           ...style,
           caretColor: 'var(--lobster-text-primary)',
-        }}
-      />
-    </div>
-  );
+          }}
+        />
+      </div>
+    );
 
   const readOnlyContextRow = isLarge && showReadOnlyContext && !useHomeContextLayout ? (
     <div className="mt-2 grid min-h-7 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 px-4">
@@ -1763,6 +1844,21 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       <div aria-hidden="true" />
     </div>
   ) : null;
+
+  const voiceQuotaLimitSeconds = asrQuota.limitSecondsToday
+    ?? (isAsrSubscribed ? DEFAULT_SUBSCRIBED_ASR_LIMIT_SECONDS : DEFAULT_FREE_ASR_LIMIT_SECONDS);
+  const voiceQuotaLimitText = formatVoiceInputQuotaLimit(voiceQuotaLimitSeconds);
+  const voiceQuotaDescription = i18nService
+    .t(isAsrSubscribed ? 'voiceInputQuotaExhaustedSubscribedDesc' : 'voiceInputQuotaExhaustedFreeDesc')
+    .replace('{limit}', voiceQuotaLimitText);
+  const handleVoiceQuotaPrimary = async () => {
+    if (isAsrSubscribed) {
+      setShowVoiceQuotaPrompt(false);
+      return;
+    }
+    setShowVoiceQuotaPrompt(false);
+    await window.electron.shell.openExternal(getPortalPricingUrl());
+  };
 
   return (
     <div className="relative">
@@ -1816,14 +1912,21 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                     onDismiss={() => setMentionPickerOpen(false)}
                   />
                 )}
-                <div className="flex items-center justify-between gap-3 px-4 pb-2 pt-1">
+                <div className="relative flex items-center justify-between gap-3 px-4 pb-2 pt-1">
+                  {voiceRecordingUiState.showFooterRecordingStatus && (
+                    <div className="pointer-events-none absolute inset-x-0 top-1/2 z-20 flex -translate-y-1/2 justify-center">
+                      <VoiceInputRecordingStatus
+                        elapsedSeconds={recordingElapsedSeconds}
+                        showHint={!hasPromptText}
+                      />
+                    </div>
+                  )}
                   <div className="flex min-w-0 items-center gap-2">
-                    {largeInputToolActions}
+                    {voiceRecordingUiState.showLargeInputControls && largeInputToolActions}
                   </div>
-                  {largeVoiceRecordingStatus}
                   <div className="flex shrink-0 items-center gap-2">
                     {contextUsageControl}
-                    {largeModelSelector}
+                    {voiceRecordingUiState.showLargeModelSelector && largeModelSelector}
                     {largeVoiceInputButton}
                     {largeSendButton}
                   </div>
@@ -1925,9 +2028,17 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   onDismiss={() => setMentionPickerOpen(false)}
                 />
               )}
-              <div className={`flex items-center justify-between gap-3 px-4 ${isCompact ? 'pb-1.5 pt-0.5' : 'pb-2 pt-1.5'}`}>
+              <div className={`relative flex items-center justify-between gap-3 px-4 ${isCompact ? 'pb-1.5 pt-0.5' : 'pb-2 pt-1.5'}`}>
+                {voiceRecordingUiState.showFooterRecordingStatus && (
+                  <div className="pointer-events-none absolute inset-x-0 top-1/2 z-20 flex -translate-y-1/2 justify-center">
+                    <VoiceInputRecordingStatus
+                      elapsedSeconds={recordingElapsedSeconds}
+                      showHint={!hasPromptText}
+                    />
+                  </div>
+                )}
                 <div className="flex min-w-0 items-center gap-2 relative">
-                  {showFolderSelector && (
+                  {voiceRecordingUiState.showLargeInputControls && showFolderSelector && (
                     <>
                       <div className="flex items-center">
                         <button
@@ -1972,12 +2083,11 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                       )}
                     </>
                   )}
-                  {largeInputToolActions}
+                  {voiceRecordingUiState.showLargeInputControls && largeInputToolActions}
                 </div>
-                {largeVoiceRecordingStatus}
                 <div className="flex shrink-0 items-center gap-2">
                   {contextUsageControl}
-                  {largeModelSelector}
+                  {voiceRecordingUiState.showLargeModelSelector && largeModelSelector}
                   {largeVoiceInputButton}
                   {largeSendButton}
                 </div>
@@ -2009,12 +2119,12 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-secondary hover:bg-surface-raised hover:text-foreground transition-colors"
                   title={i18nService.t('coworkAddFile')}
                   aria-label={i18nService.t('coworkAddFile')}
-                  disabled={disabled || isStreaming || isAddingFile}
+                  disabled={disabled || isStreaming || isAddingFile || voiceInputLocksEditing}
                 >
                   <PaperClipIcon className="h-5 w-5" />
                 </button>
                 {renderVoiceInputButton(
-                  'flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg',
+                  'flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full',
                   'h-5 w-5',
                 )}
               </div>
@@ -2070,6 +2180,39 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
           showLearnMore={false}
           onClose={() => setShowVoiceLoginPrompt(false)}
         />
+      )}
+      {showVoiceQuotaPrompt && (
+        <Modal
+          onClose={() => setShowVoiceQuotaPrompt(false)}
+          overlayClassName="fixed inset-0 z-[10050] flex items-center justify-center modal-backdrop px-4"
+          className="modal-content w-full max-w-sm rounded-2xl border border-border bg-surface p-5 shadow-modal"
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="text-base font-semibold leading-6 text-foreground">
+                {i18nService.t('voiceInputQuotaExhaustedTitle')}
+              </div>
+              <div className="mt-1.5 text-sm leading-5 text-secondary">
+                {voiceQuotaDescription}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowVoiceQuotaPrompt(false)}
+              className="-mr-1 -mt-1 rounded-lg p-1 text-secondary transition-colors hover:bg-surface-raised hover:text-foreground"
+              aria-label={i18nService.t('close')}
+            >
+              <XMarkIcon className="h-5 w-5" />
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => { void handleVoiceQuotaPrimary(); }}
+            className="mt-5 w-full rounded-lg bg-primary px-3 py-2.5 text-sm font-medium text-white transition-colors hover:bg-primary/90"
+          >
+            {i18nService.t(isAsrSubscribed ? 'voiceInputQuotaAcknowledge' : 'voiceInputUpgradeSubscription')}
+          </button>
+        </Modal>
       )}
     </div>
   );

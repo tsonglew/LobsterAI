@@ -137,6 +137,13 @@ async function loadConfigServiceWithStoredConfig(storedConfig: AppConfig) {
 
   (globalThis as unknown as { window?: unknown }).window = {
     dispatchEvent: vi.fn(),
+    electron: {
+      store: {
+        get: getItem,
+        set: setItem,
+        remove: vi.fn(),
+      },
+    },
   };
 
   const { configService } = await import('./config');
@@ -368,6 +375,13 @@ describe('configService provider migrations', () => {
 
     (globalThis as unknown as { window?: unknown }).window = {
       dispatchEvent: vi.fn(),
+      electron: {
+        store: {
+          get: getItem,
+          set: setItem,
+          remove: vi.fn(),
+        },
+      },
     };
 
     const { configService } = await import('./config');

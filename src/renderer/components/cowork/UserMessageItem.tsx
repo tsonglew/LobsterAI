@@ -16,7 +16,6 @@ import EditIcon from '../icons/EditIcon';
 import MessageCopyIcon from '../icons/MessageCopyIcon';
 import SidebarKitsIcon from '../icons/SidebarKitsIcon';
 import SkillIcon from '../icons/SkillIcon';
-import MarkdownContent from '../MarkdownContent';
 import ImagePreviewModal, { type ImagePreviewSource } from './ImagePreviewModal';
 import {
   COWORK_DETAIL_CONTENT_CLASS,
@@ -25,6 +24,7 @@ import {
   messageMetaClassName,
 } from './messageDisplayUtils';
 import SelectedTextSnippetBadge from './SelectedTextSnippetBadge';
+import UserMessageContent from './UserMessageContent';
 
 // ── CopyButton (local) ──────────────────────────────────────────────────────
 
@@ -243,9 +243,9 @@ const UserMessageItem: React.FC<{
                   </div>
                 )}
                 {displayContent?.trim() && (
-                  <MarkdownContent
+                  <UserMessageContent
                     content={displayContent}
-                    className="max-w-none whitespace-pre-wrap break-words"
+                    className="max-w-none"
                     onImageClick={setExpandedImage}
                   />
                 )}

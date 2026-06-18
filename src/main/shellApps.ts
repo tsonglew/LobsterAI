@@ -53,6 +53,7 @@ export async function getAppsForFile(filePath: string): Promise<AppInfo[]> {
 }
 
 const MAX_APPS_IN_LIST = 5;
+const HTML_EXTENSIONS = new Set(['.html', '.htm']);
 
 // Bundle IDs / name fragments that are rarely useful for opening documents.
 const EXCLUDED_BUNDLE_IDS = new Set<string>([
@@ -72,6 +73,39 @@ const EXCLUDED_BUNDLE_IDS = new Set<string>([
 const EXCLUDED_NAME_PATTERNS = [
   /chrome/i, /chromium/i, /safari/i, /firefox/i, /edge$/i, /brave/i,
   /doubao/i, /browser$/i,
+];
+
+const BROWSER_BUNDLE_IDS = new Set<string>([
+  'com.google.Chrome',
+  'com.google.Chrome.canary',
+  'com.google.chrome.for.testing',
+  'org.chromium.Chromium',
+  'com.apple.Safari',
+  'org.mozilla.firefox',
+  'com.microsoft.edgemac',
+  'com.brave.Browser',
+  'company.thebrowser.Browser',
+  'company.thebrowser.dia',
+  'com.operasoftware.Opera',
+  'com.vivaldi.Vivaldi',
+  'com.360.Chrome',
+  'com.tencent.LemonBrowser',
+  'com.bytedance.macos.doubao.browser',
+]);
+const BROWSER_NAME_PATTERNS = [
+  /chrome/i,
+  /chromium/i,
+  /safari/i,
+  /firefox/i,
+  /microsoft edge/i,
+  /^edge$/i,
+  /brave/i,
+  /^arc$/i,
+  /\bdia\b/i,
+  /opera/i,
+  /vivaldi/i,
+  /browser/i,
+  /浏览器/i,
 ];
 
 // Office-class keywords grouped by file family.
@@ -123,6 +157,10 @@ const EDITOR_KEYWORDS = [
 ];
 
 function curateApps(apps: AppInfo[], ext: string): AppInfo[] {
+  if (HTML_EXTENSIONS.has(ext)) {
+    return curateBrowserApps(apps);
+  }
+
   const officeKeywords = EXT_OFFICE_KEYWORDS[ext] ?? [];
 
   const filtered = apps.filter(a => {
@@ -147,6 +185,21 @@ function curateApps(apps: AppInfo[], ext: string): AppInfo[] {
   filtered.sort((a, b) => {
     const ta = tierOf(a), tb = tierOf(b);
     if (ta !== tb) return ta - tb;
+    return a.name.localeCompare(b.name);
+  });
+
+  return filtered.slice(0, MAX_APPS_IN_LIST);
+}
+
+function curateBrowserApps(apps: AppInfo[]): AppInfo[] {
+  const filtered = apps.filter(a => {
+    if (a.bundleId && BROWSER_BUNDLE_IDS.has(a.bundleId)) return true;
+    if (BROWSER_NAME_PATTERNS.some(re => re.test(a.name))) return true;
+    return BROWSER_NAME_PATTERNS.some(re => re.test(a.path));
+  });
+
+  filtered.sort((a, b) => {
+    if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
 

@@ -1,4 +1,5 @@
 import {
+  ArrowDownIcon,
   DocumentArrowDownIcon,
   PhotoIcon,
 } from '@heroicons/react/24/outline';
@@ -63,6 +64,7 @@ import LazyRenderTurn, { clearHeightCache } from './LazyRenderTurn';
 import {
   buildConversationTurns,
   buildDisplayItems,
+  type ConversationTurn,
   COWORK_DETAIL_CONTENT_CLASS,
   COWORK_DETAIL_GUTTER_CLASS,
   hasRenderableAssistantContent,
@@ -74,6 +76,7 @@ import {
   type CoworkTextExportFormat as CoworkTextExportFormatValue,
   mergeCoworkTextExportMessages,
 } from './sessionExport';
+import UserMessageContent from './UserMessageContent';
 import UserMessageItem from './UserMessageItem';
 interface CoworkSessionDetailProps {
   onManageSkills?: () => void;
@@ -89,6 +92,9 @@ interface CoworkSessionDetailProps {
 const AUTO_SCROLL_THRESHOLD = 120;
 const NAV_SCROLL_LOCK_DURATION = 800;
 const NAV_BOTTOM_SNAP_THRESHOLD = 20;
+const WHEEL_DELTA_LINE_HEIGHT = 16;
+const SCROLL_TO_BOTTOM_SETTLE_THRESHOLD = 24;
+const SCROLL_TO_BOTTOM_SETTLE_DELAYS_MS = [600, 1200, 1800] as const;
 const ARTIFACT_PANEL_TRANSITION_MS = 200;
 const ARTIFACT_PANEL_RESIZE_HANDLE_WIDTH = 4;
 const COWORK_DETAIL_MIN_WIDTH = 480;
@@ -99,6 +105,24 @@ const SELECTED_TEXT_ACTION_SUPPRESS_MS = 250;
 const EXPANDED_CONVERSATION_PREVIEW_COLLAPSED_MAX_LENGTH = 140;
 const EXPANDED_CONVERSATION_PREVIEW_ITEM_MAX_LENGTH = 520;
 const EXPANDED_CONVERSATION_PREVIEW_ITEM_LIMIT = 8;
+const RAIL_LONG_JUMP_VIEWPORT_MULTIPLIER = 2.5;
+const RAIL_LINE_MIN_WIDTH = 6;
+const RAIL_LINE_MAX_WIDTH = 16;
+
+type RailItem = {
+  key: string;
+  turnIndex: number;
+  label: string;
+  contentLen: number;
+  isUser: boolean;
+};
+
+type RailNavigationDecision = {
+  behavior: ScrollBehavior;
+  distance: number;
+  threshold: number;
+  reason: 'long_distance' | 'nearby' | 'reduced_motion';
+};
 
 type ExpandedConversationPreviewItem = {
   id: string;
@@ -110,6 +134,108 @@ type ExpandedConversationPreviewItem = {
 type ExpandedConversationPreview = {
   latest: ExpandedConversationPreviewItem;
   items: ExpandedConversationPreviewItem[];
+};
+
+const stripRailLabelMarkdown = (value: string): string => value
+  .replace(/^#+\s+/gm, '')
+  .replace(/```[\s\S]*?```/g, ' ')
+  .replace(/`[^`]*`/g, ' ')
+  .replace(/[*_~>]/g, '')
+  .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const getRailLabel = (content: string, fallback: string): string => {
+  const stripped = stripRailLabelMarkdown(content);
+  return stripped.slice(0, 50) || fallback;
+};
+
+const buildRailItems = (turns: ConversationTurn[]): RailItem[] => {
+  const items: RailItem[] = [];
+
+  for (let index = 0; index < turns.length; index += 1) {
+    const turn = turns[index];
+    if (turn.userMessage) {
+      const content = turn.userMessage.content ?? '';
+      items.push({
+        key: `${turn.id}-user`,
+        turnIndex: index,
+        label: getRailLabel(content, `Turn ${index + 1}`),
+        contentLen: content.length,
+        isUser: true,
+      });
+    }
+
+    let assistantContent = '';
+    for (const item of turn.assistantItems) {
+      if (item.type === 'assistant' && item.message?.content) {
+        assistantContent += item.message.content;
+      }
+    }
+
+    if (assistantContent) {
+      items.push({
+        key: `${turn.id}-asst`,
+        turnIndex: index,
+        label: getRailLabel(assistantContent, 'LobsterAI'),
+        contentLen: assistantContent.length,
+        isUser: false,
+      });
+    }
+  }
+
+  return items;
+};
+
+const buildTurnToRailRange = (railItems: RailItem[]): { first: number; last: number }[] => {
+  const rangeMap: { first: number; last: number }[] = [];
+  for (let index = 0; index < railItems.length; index += 1) {
+    const turnIndex = railItems[index].turnIndex;
+    if (!rangeMap[turnIndex]) {
+      rangeMap[turnIndex] = { first: index, last: index };
+    } else {
+      rangeMap[turnIndex].last = index;
+    }
+  }
+  return rangeMap;
+};
+
+const prefersReducedMotion = (): boolean => (
+  typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+);
+
+const getRailNavigationDecision = (
+  container: HTMLDivElement,
+  targetElement: HTMLElement,
+): RailNavigationDecision => {
+  const containerRect = container.getBoundingClientRect();
+  const targetRect = targetElement.getBoundingClientRect();
+  const targetScrollTop = container.scrollTop + targetRect.top - containerRect.top;
+  const distance = Math.abs(targetScrollTop - container.scrollTop);
+  const threshold = Math.max(1, container.clientHeight) * RAIL_LONG_JUMP_VIEWPORT_MULTIPLIER;
+  if (prefersReducedMotion()) {
+    return {
+      behavior: 'auto',
+      distance,
+      threshold,
+      reason: 'reduced_motion',
+    };
+  }
+  if (distance > threshold) {
+    return {
+      behavior: 'auto',
+      distance,
+      threshold,
+      reason: 'long_distance',
+    };
+  }
+  return {
+    behavior: 'smooth',
+    distance,
+    threshold,
+    reason: 'nearby',
+  };
 };
 
 function normalizeExpandedConversationPreviewText(value: string): string {
@@ -222,6 +348,11 @@ const formatExportTimestamp = (value: Date): string => {
 const logDetailDiagnostic = (message: string): void => {
   console.log(`[CoworkSessionDetail] ${message}`);
   window.electron?.log?.fromRenderer?.('info', 'CoworkSessionDetail', message);
+};
+
+const logRailNavigationDiagnostic = (message: string): void => {
+  console.debug(`[CoworkSessionDetail] ${message}`);
+  window.electron?.log?.fromRenderer?.('debug', 'CoworkSessionDetail', message);
 };
 
 const getSelectionAnchorRect = (range: Range): DOMRect => {
@@ -752,7 +883,14 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   } | null>(null);
   const isLoadingMoreMessagesRef = useRef(false);
   const prevScrollHeightRef = useRef<number | null>(null);
+  const scrollToBottomIntentRef = useRef(false);
+  const scrollToBottomSettleTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const suppressSelectedTextActionUntilRef = useRef(0);
+
+  const clearScrollToBottomSettleTimers = useCallback(() => {
+    scrollToBottomSettleTimersRef.current.forEach(timer => clearTimeout(timer));
+    scrollToBottomSettleTimersRef.current = [];
+  }, []);
 
   const closeSelectedTextAction = useCallback((options: {
     clearSelection?: boolean;
@@ -1006,6 +1144,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const [activeSpecialPreviewTab, setActiveSpecialPreviewTab] = useState<ArtifactSpecialTab>(ArtifactSpecialTab.FileList);
   const [browserPreviewAddress, setBrowserPreviewAddress] = useState('');
   const [browserPreviewUrl, setBrowserPreviewUrl] = useState('');
+  const [browserPreviewTitle, setBrowserPreviewTitle] = useState('');
   const [browserHtmlPreviewArtifactId, setBrowserHtmlPreviewArtifactId] = useState<string | null>(null);
   const [showArtifactAddMenu, setShowArtifactAddMenu] = useState(false);
   const [artifactAddMenuPosition, setArtifactAddMenuPosition] = useState<{ left: number; top: number } | null>(null);
@@ -1025,6 +1164,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const activeSpecialPreviewTabBySessionRef = useRef<Record<string, ArtifactSpecialTab>>({});
   const browserPreviewAddressBySessionRef = useRef<Record<string, string>>({});
   const browserPreviewUrlBySessionRef = useRef<Record<string, string>>({});
+  const browserPreviewTitleBySessionRef = useRef<Record<string, string>>({});
   const browserHtmlPreviewArtifactIdBySessionRef = useRef<Record<string, string>>({});
   const browserHtmlPreviewSessionIdBySessionRef = useRef<Record<string, string>>({});
   const browserHtmlPreviewUrlBySessionRef = useRef<Record<string, string>>({});
@@ -1054,6 +1194,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       .filter((item): item is { tab: typeof artifactPreviewTabs[number]; artifact: Artifact } => Boolean(item.artifact));
   }, [artifactPreviewTabs, sessionArtifacts]);
   const shouldPinArtifactAddTab = artifactTabsIsOverflowing || artifactTabsCanScrollLeft || artifactTabsCanScrollRight;
+  const browserPreviewTabTitle = browserPreviewTitle.trim() || i18nService.t('artifactBrowserTab');
 
   const loadedFileIdsRef = useRef<Set<string>>(new Set());
 
@@ -1168,6 +1309,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       : ArtifactSpecialTab.FileList);
     setBrowserPreviewAddress(sessionId ? browserPreviewAddressBySessionRef.current[sessionId] ?? '' : '');
     setBrowserPreviewUrl(sessionId ? browserPreviewUrlBySessionRef.current[sessionId] ?? '' : '');
+    setBrowserPreviewTitle(sessionId ? browserPreviewTitleBySessionRef.current[sessionId] ?? '' : '');
     setBrowserHtmlPreviewArtifactId(sessionId ? browserHtmlPreviewArtifactIdBySessionRef.current[sessionId] ?? null : null);
     setIsArtifactPanelExpanded(false);
     setIsExpandedPromptInputHidden(false);
@@ -1240,12 +1382,26 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
   }, [clearBrowserHtmlPreviewState, sessionId]);
 
+  const handleBrowserPreviewTitleChange = useCallback((value: string) => {
+    const nextTitle = value.trim();
+    setBrowserPreviewTitle(nextTitle);
+    if (sessionId) {
+      if (nextTitle) {
+        browserPreviewTitleBySessionRef.current[sessionId] = nextTitle;
+      } else {
+        delete browserPreviewTitleBySessionRef.current[sessionId];
+      }
+    }
+  }, [sessionId]);
+
   const clearBrowserPreviewState = useCallback(() => {
     setBrowserPreviewAddress('');
     setBrowserPreviewUrl('');
+    setBrowserPreviewTitle('');
     if (sessionId) {
       delete browserPreviewAddressBySessionRef.current[sessionId];
       delete browserPreviewUrlBySessionRef.current[sessionId];
+      delete browserPreviewTitleBySessionRef.current[sessionId];
       clearBrowserHtmlPreviewState(sessionId);
     }
   }, [clearBrowserHtmlPreviewState, sessionId]);
@@ -1328,6 +1484,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       setBrowserHtmlPreviewArtifactId(artifact.id);
       handleBrowserPreviewAddressChange(artifact.filePath);
       handleBrowserPreviewUrlChange(result.url);
+      handleBrowserPreviewTitleChange('');
     } catch (error) {
       if (!previousPreviewSessionId) {
         clearBrowserHtmlPreviewState(sessionId);
@@ -1341,6 +1498,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     currentSession?.id,
     dispatch,
     handleBrowserPreviewAddressChange,
+    handleBrowserPreviewTitleChange,
     handleBrowserPreviewUrlChange,
     sessionId,
     setSessionActiveSpecialPreviewTab,
@@ -1353,7 +1511,13 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     handleOpenArtifactBrowserTab();
     handleBrowserPreviewAddressChange(url);
     handleBrowserPreviewUrlChange(url);
-  }, [handleBrowserPreviewAddressChange, handleBrowserPreviewUrlChange, handleOpenArtifactBrowserTab]);
+    handleBrowserPreviewTitleChange('');
+  }, [
+    handleBrowserPreviewAddressChange,
+    handleBrowserPreviewTitleChange,
+    handleBrowserPreviewUrlChange,
+    handleOpenArtifactBrowserTab,
+  ]);
 
   const handleOpenArtifactFileListFromMenu = useCallback(() => {
     setShowArtifactAddMenu(false);
@@ -1639,55 +1803,54 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     try {
       const messages = currentSession.messages;
       const detected: Artifact[] = [];
-      const seenFilePaths = new Set<string>();
-      const seenLocalServiceUrls = new Set<string>();
-      const rememberArtifactFilePaths = (artifacts: Artifact[]) => {
-        for (const artifact of artifacts) {
-          if (artifact.filePath) {
-            seenFilePaths.add(normalizeFilePathForDedup(artifact.filePath));
-          }
-        }
+      const pushFileArtifactIfNew = (artifact: Artifact, seenFilePaths: Set<string>) => {
+        const normalized = artifact.filePath ? normalizeFilePathForDedup(artifact.filePath) : '';
+        if (!artifact.filePath || seenFilePaths.has(normalized)) return;
+        seenFilePaths.add(normalized);
+        detected.push(artifact);
+      };
+      const pushLocalServiceArtifactIfNew = (artifact: Artifact, seenLocalServiceUrls: Set<string>) => {
+        const url = artifact.url || artifact.content;
+        const normalized = normalizeLocalServiceUrlForDedup(url);
+        if (!url || seenLocalServiceUrls.has(normalized)) return;
+        seenLocalServiceUrls.add(normalized);
+        detected.push(artifact);
       };
 
       for (const msg of messages) {
         if (msg.type === 'assistant' && !msg.metadata?.isThinking && msg.content) {
+          const seenFilePaths = new Set<string>();
+          const seenLocalServiceUrls = new Set<string>();
           const localServiceArtifacts = parseLocalServiceUrlsFromText(msg.content, msg.id, sessionId);
           for (const serviceArtifact of localServiceArtifacts) {
-            const url = serviceArtifact.url || serviceArtifact.content;
-            const normalized = normalizeLocalServiceUrlForDedup(url);
-            if (url && !seenLocalServiceUrls.has(normalized)) {
-              seenLocalServiceUrls.add(normalized);
-              detected.push(serviceArtifact);
-            }
+            pushLocalServiceArtifactIfNew(serviceArtifact, seenLocalServiceUrls);
           }
 
           const fileLinks = parseFileLinksFromMessage(msg.content, msg.id, sessionId);
           for (const fl of fileLinks) {
-            const normalized = fl.filePath ? normalizeFilePathForDedup(fl.filePath) : '';
-            if (fl.filePath && !seenFilePaths.has(normalized)) {
-              seenFilePaths.add(normalized);
-              detected.push(fl);
-            }
+            pushFileArtifactIfNew(fl, seenFilePaths);
           }
 
           const contentWithoutFileLinks = stripFileLinksFromText(msg.content);
           const pathArtifacts = parseFilePathsFromText(contentWithoutFileLinks, msg.id, sessionId);
           for (const pa of pathArtifacts) {
-            const normalized = pa.filePath ? normalizeFilePathForDedup(pa.filePath) : '';
-            if (pa.filePath && !seenFilePaths.has(normalized)) {
-              seenFilePaths.add(normalized);
-              detected.push(pa);
-            }
+            pushFileArtifactIfNew(pa, seenFilePaths);
           }
 
           detected.push(...parseRemoteImageArtifactsFromText(msg.content, msg.id, sessionId, 'artifact-remote-assistant'));
         }
 
         if (msg.type === 'tool_result') {
+          const seenFilePaths = new Set<string>();
           const toolMediaArtifacts = parseToolResultMediaArtifacts(msg, sessionId);
           if (toolMediaArtifacts.length > 0) {
-            detected.push(...toolMediaArtifacts);
-            rememberArtifactFilePaths(toolMediaArtifacts);
+            for (const mediaArtifact of toolMediaArtifacts) {
+              if (mediaArtifact.filePath) {
+                pushFileArtifactIfNew(mediaArtifact, seenFilePaths);
+              } else {
+                detected.push(mediaArtifact);
+              }
+            }
             continue;
           }
 
@@ -1695,11 +1858,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
           const mediaArtifacts = parseMediaTokensFromText(msg.content, msg.id, sessionId);
           for (const ma of mediaArtifacts) {
-            const normalized = ma.filePath ? normalizeFilePathForDedup(ma.filePath) : '';
-            if (ma.filePath && !seenFilePaths.has(normalized)) {
-              seenFilePaths.add(normalized);
-              detected.push(ma);
-            }
+            pushFileArtifactIfNew(ma, seenFilePaths);
           }
 
           // Only parse bare file paths from tool results of image generation tools.
@@ -1715,21 +1874,23 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           if (shouldParseFilePathsFromToolResult(toolName)) {
             const pathArtifacts = parseFilePathsFromText(msg.content, msg.id, sessionId, 'artifact-toolresult');
             for (const pa of pathArtifacts) {
-              const normalized = pa.filePath ? normalizeFilePathForDedup(pa.filePath) : '';
-              if (pa.filePath && !seenFilePaths.has(normalized)) {
-                seenFilePaths.add(normalized);
-                detected.push(pa);
-              }
+              pushFileArtifactIfNew(pa, seenFilePaths);
             }
           }
           detected.push(...parseRemoteImageArtifactsFromText(msg.content, msg.id, sessionId, 'artifact-remote-toolresult'));
         }
 
         if (msg.type === 'system') {
+          const seenFilePaths = new Set<string>();
           const toolMediaArtifacts = parseToolResultMediaArtifacts(msg, sessionId);
           if (toolMediaArtifacts.length > 0) {
-            detected.push(...toolMediaArtifacts);
-            rememberArtifactFilePaths(toolMediaArtifacts);
+            for (const mediaArtifact of toolMediaArtifacts) {
+              if (mediaArtifact.filePath) {
+                pushFileArtifactIfNew(mediaArtifact, seenFilePaths);
+              } else {
+                detected.push(mediaArtifact);
+              }
+            }
             continue;
           }
 
@@ -1737,21 +1898,13 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
           const fileLinks = parseFileLinksFromMessage(msg.content, msg.id, sessionId);
           for (const fl of fileLinks) {
-            const normalized = fl.filePath ? normalizeFilePathForDedup(fl.filePath) : '';
-            if (fl.filePath && !seenFilePaths.has(normalized)) {
-              seenFilePaths.add(normalized);
-              detected.push(fl);
-            }
+            pushFileArtifactIfNew(fl, seenFilePaths);
           }
 
           const contentWithoutFileLinks = stripFileLinksFromText(msg.content);
           const pathArtifacts = parseFilePathsFromText(contentWithoutFileLinks, msg.id, sessionId, 'artifact-system-path');
           for (const pa of pathArtifacts) {
-            const normalized = pa.filePath ? normalizeFilePathForDedup(pa.filePath) : '';
-            if (pa.filePath && !seenFilePaths.has(normalized)) {
-              seenFilePaths.add(normalized);
-              detected.push(pa);
-            }
+            pushFileArtifactIfNew(pa, seenFilePaths);
           }
 
           detected.push(...parseRemoteImageArtifactsFromText(msg.content, msg.id, sessionId, 'artifact-remote-system'));
@@ -1767,11 +1920,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             : messages[i + 1]?.type === 'tool_result' ? messages[i + 1] : undefined;
           const toolArtifact = parseToolArtifact(msg, toolResult, sessionId);
           if (toolArtifact && toolArtifact.filePath) {
-            const normalized = normalizeFilePathForDedup(toolArtifact.filePath);
-            if (!seenFilePaths.has(normalized)) {
-              seenFilePaths.add(normalized);
-              detected.push(toolArtifact);
-            }
+            detected.push(toolArtifact);
           }
         }
       }
@@ -1872,7 +2021,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       const messages = currentSession.messages;
       const cwd = currentSession.cwd;
       const toLoad: Artifact[] = [];
-      const seenFilePaths = new Set<string>();
 
       for (const msg of messages) {
         if (msg.type !== 'tool_result' || !msg.content || !msg.metadata?.isFinal) continue;
@@ -1880,6 +2028,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
         // Only detect explicit MEDIA: tokens in tool results — do NOT parse bare file paths
         // here, because tool output (e.g. `ls`) may contain many irrelevant file paths.
+        const seenFilePaths = new Set<string>();
         const mediaArtifacts = parseMediaTokensFromText(msg.content, msg.id, sessionId);
         for (const ma of mediaArtifacts) {
           const normalized = ma.filePath ? normalizeFilePathForDedup(ma.filePath) : '';
@@ -1961,8 +2110,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   useEffect(() => {
     return () => {
       if (navigatingTimerRef.current) clearTimeout(navigatingTimerRef.current);
+      clearScrollToBottomSettleTimers();
     };
-  }, []);
+  }, [clearScrollToBottomSettleTimers]);
 
   // Reset nav state when session changes
   useEffect(() => {
@@ -1970,10 +2120,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     setCurrentRailIndex(-1);
     currentRailIndexRef.current = -1;
     isNavigatingRef.current = false;
+    scrollToBottomIntentRef.current = false;
+    clearScrollToBottomSettleTimers();
     turnElsCacheRef.current = [];
     if (navigatingTimerRef.current) clearTimeout(navigatingTimerRef.current);
     setHoveredRailIndex(null);
-  }, [currentSession?.id]);
+  }, [clearScrollToBottomSettleTimers, currentSession?.id]);
 
   useEffect(() => {
     const handleOpenShareOptions = (event: Event) => {
@@ -2223,6 +2375,10 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     const isNearBottom = distanceToBottom <= AUTO_SCROLL_THRESHOLD;
     setShouldAutoScroll((prev) => (prev === isNearBottom ? prev : isNearBottom));
+    if (scrollToBottomIntentRef.current && distanceToBottom <= SCROLL_TO_BOTTOM_SETTLE_THRESHOLD) {
+      scrollToBottomIntentRef.current = false;
+      clearScrollToBottomSettleTimers();
+    }
 
     // Check if content overflows the container (use functional updater to avoid redundant re-renders)
     const scrollable = container.scrollHeight > container.clientHeight;
@@ -2296,7 +2452,65 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       currentRailIndexRef.current = railIdx;
       setCurrentRailIndex(railIdx);
     }
-  }, [currentSession?.id, currentSession?.messagesOffset]);
+  }, [clearScrollToBottomSettleTimers, currentSession?.id, currentSession?.messagesOffset]);
+
+  const handleScrollToBottom = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const prefersReducedMotion = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    console.debug(
+      `[CoworkSessionDetail] scroll to bottom requested for session ${currentSession?.id ?? 'unknown'}; distance was ${Math.max(0, Math.round(distanceToBottom))}px.`,
+    );
+    clearScrollToBottomSettleTimers();
+    scrollToBottomIntentRef.current = true;
+    if (prefersReducedMotion) {
+      setShouldAutoScroll(true);
+    }
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior: prefersReducedMotion ? 'auto' : 'smooth',
+    });
+    const lastRail = railItemCountRef.current > 0 ? railItemCountRef.current - 1 : -1;
+    currentRailIndexRef.current = lastRail;
+    setCurrentRailIndex(lastRail);
+    SCROLL_TO_BOTTOM_SETTLE_DELAYS_MS.forEach((delayMs, index) => {
+      const timer = setTimeout(() => {
+        if (!scrollToBottomIntentRef.current) return;
+        const latestContainer = scrollContainerRef.current;
+        if (!latestContainer) return;
+        const latestDistance = latestContainer.scrollHeight - latestContainer.scrollTop - latestContainer.clientHeight;
+        if (latestDistance <= SCROLL_TO_BOTTOM_SETTLE_THRESHOLD) {
+          scrollToBottomIntentRef.current = false;
+          clearScrollToBottomSettleTimers();
+          setShouldAutoScroll(true);
+          return;
+        }
+        latestContainer.scrollTo({
+          top: latestContainer.scrollHeight,
+          behavior: index === SCROLL_TO_BOTTOM_SETTLE_DELAYS_MS.length - 1 ? 'auto' : 'smooth',
+        });
+      }, delayMs);
+      scrollToBottomSettleTimersRef.current.push(timer);
+    });
+  }, [clearScrollToBottomSettleTimers, currentSession?.id]);
+
+  const handleScrollToBottomWheel = useCallback((event: React.WheelEvent<HTMLButtonElement>) => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const deltaMultiplier = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+      ? WHEEL_DELTA_LINE_HEIGHT
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+        ? container.clientHeight
+        : 1;
+    event.preventDefault();
+    container.scrollBy({
+      left: event.deltaX * deltaMultiplier,
+      top: event.deltaY * deltaMultiplier,
+      behavior: 'auto',
+    });
+  }, []);
 
   // Auto-load older messages if content doesn't fill the container (no scrollbar = onScroll never fires)
   useEffect(() => {
@@ -2329,6 +2543,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     prevScrollHeightRef.current = null;
     isLoadingMoreMessagesRef.current = false;
     setIsLoadingMoreMessages(false);
+    if (scrollToBottomIntentRef.current) {
+      requestAnimationFrame(() => {
+        const latestContainer = scrollContainerRef.current;
+        if (!latestContainer || !scrollToBottomIntentRef.current) return;
+        latestContainer.scrollTo({
+          top: latestContainer.scrollHeight,
+          behavior: 'auto',
+        });
+      });
+    }
   }, [currentSession?.messages.length]);
 
   const navigateToRailItem = useCallback((railIndex: number) => {
@@ -2353,13 +2577,30 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     if (container) {
       const el = container.querySelector<HTMLElement>(`[data-rail-index="${railIndex}"]`);
       if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        const decision = getRailNavigationDecision(container, el);
+        if (decision.behavior === 'auto') {
+          logRailNavigationDiagnostic(
+            `rail navigation used instant scroll for item ${railIndex}; reason=${decision.reason}; distance=${Math.round(decision.distance)}px; threshold=${Math.round(decision.threshold)}px.`,
+          );
+        }
+        el.scrollIntoView({ behavior: decision.behavior, block: 'start' });
       } else if (targetTurnIdx >= 0) {
         // Fallback: scroll to the turn element (always in DOM)
         const turnEls = turnElsCacheRef.current;
         if (targetTurnIdx < turnEls.length) {
-          turnEls[targetTurnIdx].scrollIntoView({ behavior: 'smooth', block: 'start' });
+          const targetEl = turnEls[targetTurnIdx];
+          const decision = getRailNavigationDecision(container, targetEl);
+          if (decision.behavior === 'auto') {
+            logRailNavigationDiagnostic(
+              `rail navigation used instant fallback scroll for item ${railIndex}; reason=${decision.reason}; distance=${Math.round(decision.distance)}px; threshold=${Math.round(decision.threshold)}px.`,
+            );
+          }
+          targetEl.scrollIntoView({ behavior: decision.behavior, block: 'start' });
+        } else {
+          logRailNavigationDiagnostic(`rail navigation skipped item ${railIndex} because target turn ${targetTurnIdx} is not mounted.`);
         }
+      } else {
+        logRailNavigationDiagnostic(`rail navigation skipped item ${railIndex} because no target turn was found.`);
       }
     }
 
@@ -2481,6 +2722,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const messages = currentSession?.messages;
   const displayItems = useMemo(() => messages ? buildDisplayItems(messages) : [], [messages]);
   const turns = useMemo(() => buildConversationTurns(displayItems), [displayItems]);
+  const railItems = useMemo(() => buildRailItems(turns), [turns]);
+  const railMaxContentLength = useMemo(
+    () => railItems.reduce((acc, item) => Math.max(acc, item.contentLen), 1),
+    [railItems],
+  );
 
   // Cache turn-level DOM elements (data-turn-index, always in DOM even for lazy turns)
   useEffect(() => {
@@ -2490,6 +2736,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       container.querySelectorAll<HTMLElement>('[data-turn-index]')
     );
   }, [turns]);
+
+  useLayoutEffect(() => {
+    railItemCountRef.current = railItems.length;
+    turnToRailRangeRef.current = buildTurnToRailRange(railItems);
+  }, [railItems]);
 
   // Sync rail index when turns change or rail first appears (isScrollable becomes true)
   useEffect(() => {
@@ -2580,7 +2831,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     : 0;
   const artifactPanelInnerWidth = artifactPanelIsOverlay ? '100%' : artifactPanelFrameWidth;
   const shouldShowTurnNavigationRail = turns.length > 1 && isScrollable;
+  const shouldShowScrollToBottom = isScrollable && !shouldAutoScroll;
   const expandedConversationPreview = getExpandedConversationPreview(currentSession.messages);
+  const resolvedRailIndex = currentRailIndex < 0 || currentRailIndex >= railItems.length
+    ? railItems.length - 1
+    : currentRailIndex;
 
   const renderConversationTurns = () => {
     let railCounter = 0;
@@ -2627,7 +2882,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           }
         }
       }
-      const turnArtifacts = sessionArtifacts.filter(
+      const turnArtifacts = rawSessionArtifacts.filter(
         a => turnMessageIds.has(a.messageId) && PREVIEWABLE_ARTIFACT_TYPES.has(a.type)
       );
 
@@ -2775,10 +3030,10 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                         type="button"
                         onClick={handleActivateArtifactBrowserTab}
                         className="flex min-w-0 items-center gap-1.5 px-2 text-left"
-                        title={i18nService.t('artifactBrowserTab')}
+                        title={browserPreviewTabTitle}
                       >
                         <ArtifactBrowserTabIcon className="h-3.5 w-3.5 shrink-0" />
-                        <span className="truncate">{i18nService.t('artifactBrowserTab')}</span>
+                        <span className="truncate">{browserPreviewTabTitle}</span>
                       </button>
                       <button
                         type="button"
@@ -3094,79 +3349,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               className="overflow-y-auto min-h-0 flex-1"
               style={{ scrollbarWidth: 'none' }}
             >
-            {(() => {
-              // Build flat list of messages with their content length and turn index
-              const MIN_W = 6;  // px
-              const MAX_W = 16; // px
-              // Strip common markdown syntax for tooltip display
-              const stripMd = (s: string) => s
-                .replace(/^#+\s+/gm, '')
-                .replace(/```[\s\S]*?```/g, ' ')
-                .replace(/`[^`]*`/g, ' ')
-                .replace(/[*_~>]/g, '')
-                .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-                .replace(/\s+/g, ' ')
-                .trim();
-              // Get first meaningful text snippet from content
-              const getLabel = (content: string, fallback: string) => {
-                const stripped = stripMd(content);
-                return stripped.slice(0, 50) || fallback;
-              };
-              type RailItem = { key: string; turnIndex: number; label: string; contentLen: number; isUser: boolean };
-              const items: RailItem[] = [];
-              for (let i = 0; i < turns.length; i++) {
-                const turn = turns[i];
-                if (turn.userMessage) {
-                  const content = turn.userMessage.content ?? '';
-                  items.push({
-                    key: `${turn.id}-user`,
-                    turnIndex: i,
-                    label: getLabel(content, `Turn ${i + 1}`),
-                    contentLen: content.length,
-                    isUser: true,
-                  });
-                }
-                // Aggregate all assistant content into one line per turn
-                let asstContent = '';
-                for (const item of turn.assistantItems) {
-                  if (item.type === 'assistant' && item.message?.content) {
-                    asstContent += item.message.content;
-                  }
-                }
-                if (asstContent) {
-                  items.push({
-                    key: `${turn.id}-asst`,
-                    turnIndex: i,
-                    label: getLabel(asstContent, 'LobsterAI'),
-                    contentLen: asstContent.length,
-                    isUser: false,
-                  });
-                }
-              }
-              const maxLen = items.reduce((acc, m) => Math.max(acc, m.contentLen), 1);
-              // Sync rail item count and turn-to-rail mapping
-              railItemCountRef.current = items.length;
-              const rangeMap: { first: number; last: number }[] = [];
-              for (let ri = 0; ri < items.length; ri++) {
-                const ti = items[ri].turnIndex;
-                if (!rangeMap[ti]) {
-                  rangeMap[ti] = { first: ri, last: ri };
-                } else {
-                  rangeMap[ti].last = ri;
-                }
-              }
-              turnToRailRangeRef.current = rangeMap;
-
-              // Clamp rail index to valid range
-              const resolvedRailIndex = currentRailIndex < 0 || currentRailIndex >= items.length
-                ? items.length - 1
-                : currentRailIndex;
-
-              return items.map((msg, idx) => {
+              {railItems.map((msg, idx) => {
                 const isActive = idx === resolvedRailIndex;
                 const isHovered = idx === hoveredRailIndex;
-                const ratio = msg.contentLen / maxLen;
-                const lineW = Math.round(MIN_W + ratio * (MAX_W - MIN_W));
+                const ratio = msg.contentLen / railMaxContentLength;
+                const lineW = Math.round(RAIL_LINE_MIN_WIDTH + ratio * (RAIL_LINE_MAX_WIDTH - RAIL_LINE_MIN_WIDTH));
                 return (
                   <button
                     key={msg.key}
@@ -3194,12 +3381,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                           ? 'bg-neutral-800 dark:bg-neutral-200'
                           : 'bg-neutral-300 dark:bg-neutral-600'
                       }`}
-                      style={{ width: isActive || isHovered ? MAX_W : lineW }}
+                      style={{ width: isActive || isHovered ? RAIL_LINE_MAX_WIDTH : lineW }}
                     />
                   </button>
                 );
-              });
-            })()}
+              })}
             </div>
 
             {/* Down Arrow */}
@@ -3260,6 +3446,18 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             </div>
           </div>,
           document.body
+        )}
+        {shouldShowScrollToBottom && (
+          <button
+            type="button"
+            onClick={handleScrollToBottom}
+            onWheel={handleScrollToBottomWheel}
+            className="absolute bottom-4 left-1/2 z-20 inline-flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-foreground/85 shadow-[0_2px_10px_rgba(15,23,42,0.12)] transition-colors hover:bg-surface-raised hover:text-foreground dark:shadow-[0_2px_14px_rgba(0,0,0,0.36)]"
+            aria-label={i18nService.t('coworkScrollToBottom')}
+            title={i18nService.t('coworkScrollToBottom')}
+          >
+            <ArrowDownIcon className="h-4 w-4 stroke-[2.1]" />
+          </button>
         )}
       </div>
 
@@ -3339,16 +3537,19 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                               : 'min-w-0 flex-1 px-1 py-1 text-foreground'
                           }
                         >
-                          <MarkdownContent
-                            content={item.content}
-                            className={
-                              item.role === 'user'
-                                ? 'max-w-none whitespace-pre-wrap break-words text-xs leading-5'
-                                : 'prose dark:prose-invert max-w-none text-xs leading-5'
-                            }
-                            resolveLocalFilePath={resolveLocalFilePath}
-                            showRevealInFolderAction={item.role === 'assistant'}
-                          />
+                          {item.role === 'user' ? (
+                            <UserMessageContent
+                              content={item.content}
+                              className="max-w-none text-xs leading-5"
+                            />
+                          ) : (
+                            <MarkdownContent
+                              content={item.content}
+                              className="prose dark:prose-invert max-w-none text-xs leading-5"
+                              resolveLocalFilePath={resolveLocalFilePath}
+                              showRevealInFolderAction
+                            />
+                          )}
                         </div>
                       </div>
                     ))}
@@ -3468,6 +3669,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               browserHtmlArtifactId={browserHtmlPreviewArtifactId}
               onBrowserAddressChange={handleBrowserPreviewAddressChange}
               onBrowserUrlChange={handleBrowserPreviewUrlChange}
+              onBrowserTitleChange={handleBrowserPreviewTitleChange}
               onOpenFileListTab={handleOpenArtifactFileListTab}
               onOpenBrowserTab={handleOpenArtifactBrowserTab}
               onOpenHtmlFileInBrowser={handleOpenHtmlFileInBrowser}

@@ -3,8 +3,6 @@ import type { AppUpdateCheckResult, AppUpdateRuntimeState } from '../../shared/a
 import type {
   AsrRealtimeSessionRequest,
   AsrRealtimeSessionResult,
-  AsrRecognizeRequest,
-  AsrRecognizeResult,
 } from '../../shared/asr/constants';
 import type {
   BrowserDiagnosticResult,
@@ -22,6 +20,7 @@ import type {
 import type {
   HtmlShareAccessMode,
   HtmlShareConfigurableStatus,
+  HtmlShareDisabledSource,
   HtmlShareSourceType,
   HtmlShareStatus,
 } from '../../shared/htmlShare/constants';
@@ -370,6 +369,8 @@ interface HtmlShareResult {
   contentUpdatedAt?: string;
   disabledAt?: string | null;
   disabledReason?: string | null;
+  disabledSource?: HtmlShareDisabledSource | null;
+  restoredByUpdate?: boolean;
   error?: string;
   code?: number;
   warnings?: string[];
@@ -665,7 +666,7 @@ interface IElectronAPI {
     remoteManaged: (
       sessionId: string,
     ) => Promise<{ success: boolean; remoteManaged: boolean; error?: string }>;
-    listSessions: (options?: { limit?: number; offset?: number; agentId?: string }) => Promise<{
+    listSessions: (options?: { limit?: number; offset?: number; agentId?: string; searchQuery?: string }) => Promise<{
       success: boolean;
       sessions?: CoworkSessionSummary[];
       hasMore?: boolean;
@@ -951,7 +952,6 @@ interface IElectronAPI {
     get: (shareId: string) => Promise<{ success: boolean; share?: unknown; error?: string }>;
   };
   asr: {
-    recognize: (options: AsrRecognizeRequest) => Promise<AsrRecognizeResult>;
     createRealtimeSession: (options: AsrRealtimeSessionRequest) => Promise<AsrRealtimeSessionResult>;
   };
   artifact: {
