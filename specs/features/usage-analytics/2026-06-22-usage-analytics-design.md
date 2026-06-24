@@ -658,6 +658,83 @@ export const LogReporterActionPrefix = {
   - 文本编辑只记录字段是否发生变更，不记录内容长度或文本内容。
   - 关闭和切换 tab 只记录行为摘要，避免对每次输入做高频上报。
 
+#### 2.4.33 `lobsterai_scheduled_task_action`
+
+- 状态：已实现。
+- 触发时机：用户在「定时任务」界面切换任务/历史 tab、新建任务、选择任务、打开任务菜单、开关任务、手动运行、编辑、删除确认、填写任务表单、选择模板、查看运行历史和进入运行会话时发送。
+- 事件含义：统计定时任务入口使用、任务配置偏好、模板使用、任务运行操作、历史筛选和关键操作结果。
+- 业务参数：
+  - `source`：string，触发来源。当前取值包括 `scheduled_tasks_view`、`scheduled_tasks_list`、`scheduled_task_detail`、`scheduled_task_form`、`scheduled_tasks_history`、`scheduled_task_history`。
+  - `actionType`：string，动作类型。当前取值包括：
+    - 页面与列表：`tab_change`、`new_task`、`select_task`、`task_menu_open`、`toggle_enabled`、`toggle_enabled_success`、`toggle_enabled_failed`、`run_manually`、`run_manually_success`、`run_manually_failed`、`edit_task`、`delete_confirm_open`、`delete_confirm_cancel`、`delete_success`、`delete_failed`、`retry_load_tasks`。
+    - 表单：`form_open`、`form_cancel`、`form_unsaved_confirm_open`、`form_unsaved_confirm_submit`、`form_unsaved_confirm_cancel`、`template_picker_open`、`template_picker_close`、`template_selected`、`validation_failed`、`create_submit`、`create_success`、`create_failed`、`edit_submit`、`edit_success`、`edit_failed`。
+    - 详情：`detail_edit`、`detail_run_manually`、`detail_run_manually_success`、`detail_run_manually_failed`。
+    - 历史：`history_filter_status`、`history_filter_date`、`history_filter_clear`、`history_load_more`、`history_view_session`、`retry_load_history`、`task_history_filter_status`、`task_history_filter_date`、`task_history_filter_clear`、`task_history_load_more`、`task_history_view_session`。
+  - `activeTab`：string，当前页签；当前取值为 `tasks` 或 `history`。
+  - `targetTab`：string，目标页签；仅 tab 切换时发送。
+  - `viewMode`：string，当前视图模式；当前取值为 `list`、`create`、`edit`、`detail`。
+  - `mode`：string，表单模式；当前取值为 `create` 或 `edit`。
+  - `result`：string，动作结果。当前取值包括 `success`、`failed`、`retry`。
+  - `errorCode`：string，失败分类；仅失败或校验失败时发送，不上传错误详情。
+  - `errorFields`：string，校验失败字段 key 列表，以英文逗号连接。
+  - `errorFieldCount`：number，校验失败字段数量。
+  - `scheduleKind`：string，定时计划底层类型；当前取值包括 `at`、`cron`、`every`。
+  - `planType`：string，表单或解析后的计划类型；当前取值包括 `once`、`hourly`、`daily`、`weekly`、`monthly`、`cron`、`advanced`。
+  - `cronMode`：string，cron 表单模式；当前取值为 `builder` 或 `raw`。
+  - `cronExpr`：string，cron 表达式。该字段不包含用户正文或目标账号，用于分析定时频率偏好。
+  - `cronTz`：string，cron 时区。
+  - `hour` / `minute`：number，计划触发时间的小时和分钟。
+  - `weekdayCount`：number，选择的星期数量。
+  - `weekdays`：string，选择的星期列表，以英文逗号连接。
+  - `monthDay`：number，月度计划的日期。
+  - `everyMs`：number，`every` 类型计划的间隔毫秒数。
+  - `payloadKind`：string，任务 payload 类型；当前取值为 `agentTurn` 或 `systemEvent`。
+  - `payloadTextLength`：number，prompt/payload 文本长度。
+  - `hasPrompt`：boolean，是否填写 prompt/payload 文本。
+  - `deliveryMode`：string，通知投递模式；当前取值包括 `none`、`announce`、`webhook`。
+  - `notifyChannel`：string，通知渠道 key。
+  - `notifyPlatform`：string，通知渠道所属 IM 平台。
+  - `hasNotifyTarget`：boolean，是否选择通知目标。
+  - `hasNotifyAccount`：boolean，是否选择多实例通知账号。
+  - `enabled`：boolean，任务是否启用。
+  - `targetEnabled`：boolean，用户开关任务后的目标状态。
+  - `taskStatus`：string，任务当前运行态摘要；当前取值为 `running` 或 `idle`。
+  - `lastStatus`：string，最近一次运行状态；当前取值包括 `success`、`error`、`skipped`、`running`。
+  - `hasNextRun`：boolean，是否有下一次运行时间。
+  - `consecutiveErrors`：number，连续错误次数。
+  - `hasLastError`：boolean，是否存在最近错误。
+  - `sessionTarget`：string，任务会话目标；当前取值包括 `main`、`isolated`。
+  - `wakeMode`：string，任务唤醒模式；当前取值包括 `now`、`next-heartbeat`。
+  - `hasSessionKey`：boolean，任务是否绑定 session key。
+  - `hasTemplate`：boolean，创建/编辑时是否应用模板。
+  - `hasInitialTemplate`：boolean，打开表单时是否带初始模板。
+  - `templateId`：string，模板 ID。
+  - `templateName`：string，模板展示名称。
+  - `modelId`：string，任务选择模型 ID。
+  - `modelName`：string，任务选择模型展示名称。
+  - `modelSource`：string，模型来源分类。当前取值为 `package` 或 `custom`。
+  - `providerKey`：string，当前模型所属 provider key。
+  - `provider`：string，当前模型所属 provider 展示名称。
+  - `selectorGroup`：string，当前模型选择器分组，取值为 `server` 或 `user`。
+  - `modelResolved`：boolean，任务模型是否能在当前模型列表中解析。
+  - `hasModel`：boolean，任务是否选择模型。
+  - `filterStatus`：string，历史筛选状态。
+  - `hasActiveFilter`：boolean，历史列表是否存在筛选条件。
+  - `hasStartDate` / `hasEndDate`：boolean，历史筛选是否设置开始/结束日期。
+  - `targetStatus`：string，用户点击的目标筛选状态。
+  - `selected`：boolean，本次筛选点击后目标状态是否被选中。
+  - `resultCount`：number，触发筛选时当前展示结果数量。
+  - `loadedCount`：number，加载更多前已加载数量。
+  - `runStatus`：string，运行记录状态。
+  - `hasSession`：boolean，运行记录是否有关联会话。
+  - `hasDuration`：boolean，运行记录是否有耗时。
+  - `durationMs`：number，运行耗时毫秒数。
+  - `hasError`：boolean，运行记录是否有错误。
+- 隐私边界：
+  - 不上传任务标题、任务描述、prompt/payload 正文、通知目标 ID/邮箱/群号/用户号、`taskId`、`runId`、`sessionId`、`sessionKey`、本地路径、凭据或错误详情。
+  - 会上传模型 ID/名称、provider、cron 表达式、通知渠道/platform、模板 ID/名称、payload 长度、计划时间和任务状态摘要，用于分析定时任务功能使用偏好。
+  - 历史页只记录筛选和是否查看关联会话，不上传运行记录 ID、任务名或会话标识。
+
 ### 2.5 请求流程
 
 ```text
