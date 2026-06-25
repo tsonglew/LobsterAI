@@ -41,6 +41,21 @@ describe('parseProposedPlanBlock', () => {
     });
   });
 
+  test('ignores inline tag mentions before the real plan block', () => {
+    expect(parseProposedPlanBlock([
+      'Plan Mode 要求我输出 <proposed_plan> 格式。',
+      '下面才是真正的计划内容：',
+      '<proposed_plan>',
+      'Summary',
+      '讲解一元二次方程。',
+      '</proposed_plan>',
+    ].join('\n'))).toEqual({
+      visibleText: 'Plan Mode 要求我输出 <proposed_plan> 格式。\n下面才是真正的计划内容：',
+      planText: 'Summary\n讲解一元二次方程。',
+      ignoredInlineOpenTagCount: 1,
+    });
+  });
+
   test('normalizes inline section labels in proposed plans', () => {
     expect(parseProposedPlanBlock('<proposed_plan>\nSummary: Build the page.\n</proposed_plan>')).toEqual({
       visibleText: '',

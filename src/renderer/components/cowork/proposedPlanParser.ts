@@ -1,4 +1,4 @@
-const OPEN_TAG_PATTERN = /<proposed_plan\b[^>]*>/i;
+const OPEN_TAG_SEARCH_PATTERN = /<proposed_plan\b[^>]*>/ig;
 const CLOSE_TAG_PATTERN = /<\/proposed_plan\s*>/i;
 const OPEN_TAG_PREFIX = '<proposed_plan';
 const FENCE_PATTERN = /^\s*(```|~~~)/;
@@ -24,6 +24,12 @@ export interface ProposedPlanParseResult {
   visibleText: string;
   planText: string | null;
   didNormalizePlanText?: boolean;
+  ignoredInlineOpenTagCount?: number;
+}
+
+interface ProposedPlanOpenMatch {
+  match: RegExpExecArray;
+  ignoredInlineOpenTagCount?: number;
 }
 
 const findTrailingOpenTagPrefixIndex = (content: string): number => {
@@ -34,6 +40,37 @@ const findTrailingOpenTagPrefixIndex = (content: string): number => {
     if (suffix.length >= 2 && OPEN_TAG_PREFIX.startsWith(suffix)) return index;
   }
   return -1;
+};
+
+const isBlockOpenTagMatch = (content: string, match: RegExpExecArray): boolean => {
+  const openIndex = match.index;
+  const previousNewlineIndex = content.lastIndexOf('\n', openIndex - 1);
+  const lineStartIndex = previousNewlineIndex < 0 ? 0 : previousNewlineIndex + 1;
+  return content.slice(lineStartIndex, openIndex).trim().length === 0;
+};
+
+const findProposedPlanOpenMatch = (content: string): ProposedPlanOpenMatch | null => {
+  let fallbackMatch: RegExpExecArray | null = null;
+  let inlineOpenTagCount = 0;
+  OPEN_TAG_SEARCH_PATTERN.lastIndex = 0;
+
+  for (let match = OPEN_TAG_SEARCH_PATTERN.exec(content); match; match = OPEN_TAG_SEARCH_PATTERN.exec(content)) {
+    if (isBlockOpenTagMatch(content, match)) {
+      return {
+        match,
+        ignoredInlineOpenTagCount: inlineOpenTagCount || undefined,
+      };
+    }
+
+    fallbackMatch ??= match;
+    inlineOpenTagCount += 1;
+  }
+
+  if (!fallbackMatch) return null;
+  return {
+    match: fallbackMatch,
+    ignoredInlineOpenTagCount: undefined,
+  };
 };
 
 const splitInlinePlanSectionLabels = (line: string): string[] => line
@@ -109,8 +146,8 @@ export const normalizeProposedPlanMarkdown = (content: string): string =>
   normalizeProposedPlanMarkdownWithFlag(content).text;
 
 export const parseProposedPlanBlock = (content: string): ProposedPlanParseResult => {
-  const openMatch = OPEN_TAG_PATTERN.exec(content);
-  if (!openMatch) {
+  const openResult = findProposedPlanOpenMatch(content);
+  if (!openResult) {
     const partialOpenIndex = findTrailingOpenTagPrefixIndex(content);
     if (partialOpenIndex >= 0) {
       return {
@@ -121,6 +158,7 @@ export const parseProposedPlanBlock = (content: string): ProposedPlanParseResult
     return { visibleText: content, planText: null };
   }
 
+  const { match: openMatch, ignoredInlineOpenTagCount } = openResult;
   const openIndex = openMatch.index;
   const contentStart = openIndex + openMatch[0].length;
   const closeMatch = CLOSE_TAG_PATTERN.exec(content.slice(contentStart));
@@ -131,6 +169,7 @@ export const parseProposedPlanBlock = (content: string): ProposedPlanParseResult
       visibleText,
       planText: normalizedPlan.text || null,
       didNormalizePlanText: normalizedPlan.didNormalize || undefined,
+      ignoredInlineOpenTagCount,
     };
   }
 
@@ -144,5 +183,6 @@ export const parseProposedPlanBlock = (content: string): ProposedPlanParseResult
     visibleText,
     planText: normalizedPlan.text || null,
     didNormalizePlanText: normalizedPlan.didNormalize || undefined,
+    ignoredInlineOpenTagCount,
   };
 };

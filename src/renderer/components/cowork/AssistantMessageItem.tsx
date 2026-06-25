@@ -96,6 +96,14 @@ const AssistantMessageItem: React.FC<{
       `Normalized inline section labels in proposed plan ${message.id}.`,
     );
   }, [message.id, proposedPlan.didNormalizePlanText]);
+  useEffect(() => {
+    if (!proposedPlan.ignoredInlineOpenTagCount) return;
+    window.electron?.log?.fromRenderer?.(
+      'debug',
+      'AssistantMessageItem',
+      `Ignored ${proposedPlan.ignoredInlineOpenTagCount} inline proposed plan tag mention(s) before block in message ${message.id}.`,
+    );
+  }, [message.id, proposedPlan.ignoredInlineOpenTagCount]);
   const handleBlur = useCallback((event: React.FocusEvent<HTMLDivElement>) => {
     const nextTarget = event.relatedTarget;
     if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
