@@ -684,6 +684,139 @@ describe('OpenClawConfigSync runtime config output', () => {
     }));
   });
 
+  test('writes explicit cache params for Anthropic, Qwen, and custom providers', async () => {
+    const { ProviderName } = await import('../../shared/providers');
+
+    mockRuntimeState.rawApiConfig = {
+      config: {
+        baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        apiKey: 'sk-qwen',
+        model: 'qwen3.5-plus',
+        apiType: 'openai',
+      },
+      providerMetadata: {
+        providerName: ProviderName.Qwen,
+        codingPlanEnabled: false,
+        supportsImage: true,
+        modelName: 'Qwen3.5 Plus',
+      },
+    };
+    mockRuntimeState.enabledProviders = [
+      {
+        providerName: ProviderName.Qwen,
+        baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        apiKey: 'sk-qwen',
+        apiType: 'openai',
+        codingPlanEnabled: false,
+        models: [
+          { id: 'qwen3.5-plus', name: 'Qwen3.5 Plus', supportsImage: true },
+          { id: 'qwen3.6-plus', name: 'Qwen3.6 Plus', supportsImage: true },
+          { id: 'qwen3.7-plus', name: 'Qwen3.7 Plus', supportsImage: true },
+        ],
+      },
+      {
+        providerName: ProviderName.Anthropic,
+        baseURL: 'https://api.anthropic.com',
+        apiKey: 'sk-anthropic',
+        apiType: 'anthropic',
+        codingPlanEnabled: false,
+        models: [
+          { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', supportsImage: true, supportsThinking: true },
+          { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', supportsImage: true, supportsThinking: true },
+        ],
+      },
+      {
+        providerName: 'custom_0',
+        baseURL: 'https://example.com/v1',
+        apiKey: 'sk-custom',
+        apiType: 'openai',
+        codingPlanEnabled: false,
+        models: [
+          {
+            id: 'claude-opus-4-6',
+            name: 'Claude Opus 4.6',
+            supportsImage: true,
+            customParams: { metadata: 'custom-cache' },
+          },
+          { id: 'anthropic/claude-sonnet-4-6', name: 'Namespaced Claude Sonnet 4.6', supportsImage: true },
+          { id: 'qwen3.5-plus', name: 'Qwen3.5 Plus', supportsImage: true },
+          { id: 'qwen3.6-plus', name: 'Qwen3.6 Plus', supportsImage: true },
+          { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', supportsImage: false },
+          { id: 'gpt-5.5-2026-04-24', name: 'GPT 5.5', supportsImage: true },
+        ],
+      },
+    ];
+
+    const sync = await createSync();
+
+    const result = sync.sync('provider-explicit-cache-defaults');
+    expect(result.ok).toBe(true);
+
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const modelDefaults = config.agents.defaults.models;
+
+    expect(modelDefaults).toEqual(expect.objectContaining({
+      'qwen/qwen3.5-plus': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'dashscope',
+          contextCacheMode: 'explicit',
+        },
+      },
+      'qwen/qwen3.6-plus': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'dashscope',
+          contextCacheMode: 'explicit',
+        },
+      },
+      'qwen/qwen3.7-plus': {},
+      'anthropic/claude-opus-4-7': {
+        params: {
+          cacheRetention: 'short',
+        },
+      },
+      'anthropic/claude-sonnet-4-6': {
+        params: {
+          cacheRetention: 'short',
+        },
+      },
+      'custom_0/claude-opus-4-6': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'anthropic-compatible',
+          contextCacheMode: 'explicit',
+          extra_body: {
+            metadata: 'custom-cache',
+          },
+        },
+      },
+      'custom_0/anthropic/claude-sonnet-4-6': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'anthropic-compatible',
+          contextCacheMode: 'explicit',
+        },
+      },
+      'custom_0/qwen3.5-plus': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'dashscope',
+          contextCacheMode: 'explicit',
+        },
+      },
+      'custom_0/qwen3.6-plus': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'dashscope',
+          contextCacheMode: 'explicit',
+        },
+      },
+      'custom_0/deepseek-v4-pro': {},
+      'custom_0/gpt-5.5-2026-04-24': {},
+    }));
+  });
+
   test('writes a complete agent model allowlist when any model has custom params', async () => {
     const { ProviderName } = await import('../../shared/providers');
 

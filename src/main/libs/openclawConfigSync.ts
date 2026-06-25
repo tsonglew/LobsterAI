@@ -100,6 +100,7 @@ const OpenClawContextCacheMode = {
 } as const;
 
 const EXPLICIT_CONTEXT_CACHE_LOG_PREFIX = '********************';
+const CUSTOM_PROVIDER_NAME_PATTERN = /^custom_[0-9]$/;
 
 function deriveNimAccountId(instance: Pick<NimInstanceConfig, 'nimToken' | 'appKey' | 'account'>): string | null {
   const nimToken = instance.nimToken?.trim();
@@ -1001,20 +1002,29 @@ const normalizeServerApiType = (apiFormat?: string): 'anthropic' | 'openai' => (
   apiFormat === 'anthropic' ? 'anthropic' : 'openai'
 );
 
-const stripServerProviderSuffix = (modelId: string, provider?: string): string => {
-  if (!provider) return modelId;
-  const suffix = `-${provider}`.toLowerCase();
+const stripExplicitContextCacheProviderSuffix = (modelId: string, provider?: string): string => {
+  const normalizedProvider = provider?.trim();
+  if (!normalizedProvider) return modelId;
+  const suffix = `-${normalizedProvider}`.toLowerCase();
   const normalized = modelId.toLowerCase();
   return normalized.endsWith(suffix)
     ? modelId.slice(0, modelId.length - suffix.length)
     : modelId;
 };
 
-const resolveServerExplicitContextCacheFamily = (
+const normalizeExplicitContextCacheModelId = (modelId: string, provider?: string): string => {
+  const withoutProviderSuffix = stripExplicitContextCacheProviderSuffix(modelId.trim(), provider);
+  const slashIndex = withoutProviderSuffix.lastIndexOf('/');
+  return slashIndex >= 0
+    ? withoutProviderSuffix.slice(slashIndex + 1).trim()
+    : withoutProviderSuffix.trim();
+};
+
+const resolveExplicitContextCacheFamily = (
   modelId: string,
   provider?: string,
 ): 'qwen' | 'claude' | null => {
-  const baseModelId = stripServerProviderSuffix(modelId, provider).toLowerCase();
+  const baseModelId = normalizeExplicitContextCacheModelId(modelId, provider).toLowerCase();
   if (baseModelId.startsWith('qwen3.5') || baseModelId.startsWith('qwen3.6')) {
     return 'qwen';
   }
@@ -1024,13 +1034,20 @@ const resolveServerExplicitContextCacheFamily = (
   return null;
 };
 
+const shouldApplyProviderExplicitContextCacheDefault = (providerName?: string): boolean => {
+  const normalizedProvider = providerName?.trim();
+  return normalizedProvider === ProviderName.Anthropic
+    || normalizedProvider === ProviderName.Qwen
+    || (!!normalizedProvider && CUSTOM_PROVIDER_NAME_PATTERN.test(normalizedProvider));
+};
+
 const resolveExplicitContextCacheDefault = (options: {
   api: OpenClawProviderApi;
   modelId: string;
   provider?: string;
   explicitContextCache?: boolean;
 }): OpenClawAgentModelDefault | null => {
-  const family = resolveServerExplicitContextCacheFamily(options.modelId, options.provider);
+  const family = resolveExplicitContextCacheFamily(options.modelId, options.provider);
   const enabled = options.explicitContextCache === true
     || family !== null;
   if (!enabled || family === null) return null;
@@ -1045,7 +1062,7 @@ const resolveExplicitContextCacheDefault = (options: {
   return null;
 };
 
-const addServerContextCacheDefault = (
+const addExplicitContextCacheDefault = (
   defaults: Record<string, OpenClawAgentModelDefault>,
   selection: OpenClawProviderSelection,
   source: {
@@ -1441,7 +1458,7 @@ loopDetection: MANAGED_TOOL_LOOP_DETECTION,
       });
       primaryModel = providerSelection.primaryModel;
       if (providerSelection.providerId === OpenClawProviderId.LobsteraiServer) {
-        addServerContextCacheDefault(perModelCustomDefaults, providerSelection, {
+        addExplicitContextCacheDefault(perModelCustomDefaults, providerSelection, {
           modelId,
         });
       }
@@ -1469,12 +1486,21 @@ loopDetection: MANAGED_TOOL_LOOP_DETECTION,
           if (!alreadyHas && sel.providerConfig.models.length > 0) {
             existing.models.push(...sel.providerConfig.models);
           }
+          if (shouldApplyProviderExplicitContextCacheDefault(p.providerName)) {
+            addExplicitContextCacheDefault(perModelCustomDefaults, sel, {
+              modelId: m.id,
+              provider: p.providerName,
+            });
+          }
           // Collect per-model custom params for agents.defaults.models.
           // Wrap in extra_body so OpenClaw's streamWithPayloadPatch merges them
           // directly into the outgoing API request body, bypassing the whitelist.
           if (m.customParams && Object.keys(m.customParams).length > 0) {
             const modelKey = `${sel.providerId}/${sel.sessionModelId}`;
-            perModelCustomDefaults[modelKey] = { params: { extra_body: { ...m.customParams } } };
+            perModelCustomDefaults[modelKey] = mergeAgentModelDefault(
+              perModelCustomDefaults[modelKey],
+              { params: { extra_body: { ...m.customParams } } },
+            );
           }
         }
       }
@@ -1532,7 +1558,7 @@ loopDetection: MANAGED_TOOL_LOOP_DETECTION,
                 modelName: sm.modelName || sm.modelId,
                 contextWindow: sm.contextWindow,
               });
-              addServerContextCacheDefault(perModelCustomDefaults, serverSel, {
+              addExplicitContextCacheDefault(perModelCustomDefaults, serverSel, {
                 modelId: sm.modelId,
                 provider: sm.provider,
                 explicitContextCache: sm.explicitContextCache,
