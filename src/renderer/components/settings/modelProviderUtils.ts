@@ -30,13 +30,8 @@ export const resolveModelSupportsImageForProvider = (
 
 export const getOpenClawProviderIdForConfig = (
   providerName: string,
-  _providerConfig: ProviderConfig,
-): string => {
-  if (providerName === ProviderName.Minimax && providerConfig.authType === 'oauth') {
-    return OpenClawProviderId.MinimaxPortal;
-  }
-  return ProviderRegistry.getOpenClawProviderId(providerName);
-};
+  providerConfig: ProviderConfig,
+): string => ProviderRegistry.getOpenClawProviderIdForConfig(providerName, providerConfig);
 
 export const providerRequiresApiKey = (provider: ProviderType) => provider !== ProviderName.Ollama
   && provider !== ProviderName.LmStudio

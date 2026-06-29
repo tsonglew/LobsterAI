@@ -1,8 +1,7 @@
 import { expect, test } from 'vitest';
 
-import { OpenClawProviderId, OpenClawProviderId, ProviderAuthType, ProviderName } from '../../../shared/providers';
+import { OpenClawProviderId, ProviderAuthType, ProviderName } from '../../../shared/providers';
 import {
-  getOpenClawProviderIdForConfig,
   getOpenClawProviderIdForConfig,
   hasProviderAuthConfigured,
   type ProviderConfig,

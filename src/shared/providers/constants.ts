@@ -670,6 +670,16 @@ class ProviderRegistryImpl {
     return this.idIndex.get(providerName)?.openClawProviderId ?? providerName ?? OpenClawProviderId.Lobster;
   }
 
+  getOpenClawProviderIdForConfig(
+    providerName: string,
+    providerConfig: { authType?: ProviderAuthType },
+  ): string {
+    if (providerName === ProviderName.Minimax && providerConfig.authType === ProviderAuthType.OAuth) {
+      return OpenClawProviderId.MinimaxPortal;
+    }
+    return this.getOpenClawProviderId(providerName);
+  }
+
   getProviderModelSupportsImage(providerName: string, modelId: string): boolean | undefined {
     const def = this.idIndex.get(providerName);
     if (!def) return undefined;
