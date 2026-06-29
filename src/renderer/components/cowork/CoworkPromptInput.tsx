@@ -1,4 +1,4 @@
-import { CheckIcon, ChevronDownIcon, ChevronRightIcon, ClipboardDocumentCheckIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
+import { CheckIcon, ChevronDownIcon, ChevronRightIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import { ArrowUpIcon, FolderIcon } from '@heroicons/react/24/solid';
 import { AuthSubscriptionStatus } from '@shared/auth/constants';
 import { ProviderName } from '@shared/providers';
@@ -68,6 +68,7 @@ import {
 import Modal from '../common/Modal';
 import DefaultAgentIcon from '../icons/DefaultAgentIcon';
 import PaperClipIcon from '../icons/PaperClipIcon';
+import PlanModeIcon from '../icons/PlanModeIcon';
 import PromptAddIcon from '../icons/PromptAddIcon';
 import SkillIcon from '../icons/SkillIcon';
 import TaskPauseIcon from '../icons/TaskPauseIcon';
@@ -1824,6 +1825,12 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       clearTimeout(skillSubmenuCloseTimerRef.current);
     }
     skillSubmenuCloseTimerRef.current = setTimeout(() => {
+      const activeElement = document.activeElement;
+      if (activeElement && addMenuRef.current?.contains(activeElement)) {
+        logPromptModelSelection('debug', 'kept skill submenu open because focus remains inside prompt tools menu');
+        skillSubmenuCloseTimerRef.current = null;
+        return;
+      }
       setShowSkillsPopover(false);
       skillSubmenuCloseTimerRef.current = null;
     }, 120);
@@ -2132,7 +2139,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
             role="menuitemcheckbox"
             aria-checked={isPlanMode}
           >
-            <ClipboardDocumentCheckIcon className="h-5 w-5 shrink-0 text-secondary" />
+            <PlanModeIcon className="h-5 w-5 shrink-0 text-secondary" />
             <span className="min-w-0 flex-1 truncate">{i18nService.t('coworkPlanMode')}</span>
             <span
               className={`relative h-5 w-9 rounded-full transition-colors ${
@@ -2285,7 +2292,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       aria-label={i18nService.t('coworkClearPlanMode')}
     >
       <span className={ACTIVE_CONTEXT_BADGE_ICON_WRAP_CLASS}>
-        <ClipboardDocumentCheckIcon className={ACTIVE_CONTEXT_BADGE_ICON_CLASS} />
+        <PlanModeIcon className={ACTIVE_CONTEXT_BADGE_ICON_CLASS} />
         <XMarkIcon className={ACTIVE_CONTEXT_BADGE_REMOVE_ICON_CLASS} />
       </span>
       <span className="min-w-0 truncate">

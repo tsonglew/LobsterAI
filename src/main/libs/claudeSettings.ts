@@ -48,6 +48,17 @@ type ProviderModelInputConfig = {
   customParams?: Record<string, unknown>;
 };
 
+export type ServerModelMetadata = {
+  modelId: string;
+  modelName?: string;
+  provider?: string;
+  apiFormat?: string;
+  supportsImage?: boolean;
+  supportsThinking?: boolean;
+  contextWindow?: number;
+  explicitContextCache?: boolean;
+};
+
 export type ApiConfigResolution = {
   config: CoworkApiConfig | null;
   error?: string;
@@ -83,31 +94,47 @@ export function setServerBaseUrlGetter(getter: () => string): void {
   serverBaseUrlGetter = getter;
 }
 
-// Cached server model metadata (populated when auth:getModels is called)
-// Keyed by modelId → { supportsImage, supportsThinking, contextWindow }
-let serverModelMetadataCache: Map<string, { supportsImage?: boolean; supportsThinking?: boolean; contextWindow?: number }> = new Map();
+// Cached server model metadata (populated when auth:getModels is called).
+// Keyed by modelId -> server-provided metadata used for OpenClaw config sync.
+let serverModelMetadataCache: Map<string, Omit<ServerModelMetadata, 'modelId'>> = new Map();
 
 const serializeServerModelMetadata = (
-  models: Array<{ modelId: string; supportsImage?: boolean; supportsThinking?: boolean; contextWindow?: number }>,
+  models: ServerModelMetadata[],
 ): string => JSON.stringify(
   models
     .map((model) => ({
       modelId: model.modelId,
+      modelName: model.modelName,
+      provider: model.provider,
+      apiFormat: model.apiFormat,
       supportsImage: model.supportsImage,
       supportsThinking: model.supportsThinking,
       contextWindow: model.contextWindow,
+      explicitContextCache: model.explicitContextCache,
     }))
     .sort((a, b) => a.modelId.localeCompare(b.modelId)),
 );
 
-export function updateServerModelMetadata(models: Array<{ modelId: string; supportsImage?: boolean; supportsThinking?: boolean; contextWindow?: number }>): boolean {
+export function updateServerModelMetadata(models: ServerModelMetadata[]): boolean {
   const previous = serializeServerModelMetadata(getAllServerModelMetadata());
-  const nextCache = new Map(models.map(m => [m.modelId, { supportsImage: m.supportsImage, supportsThinking: m.supportsThinking, contextWindow: m.contextWindow }]));
+  const nextCache = new Map(models.map(m => [m.modelId, {
+    modelName: m.modelName,
+    provider: m.provider,
+    apiFormat: m.apiFormat,
+    supportsImage: m.supportsImage,
+    supportsThinking: m.supportsThinking,
+    contextWindow: m.contextWindow,
+    explicitContextCache: m.explicitContextCache,
+  }]));
   const next = serializeServerModelMetadata(Array.from(nextCache.entries()).map(([modelId, meta]) => ({
     modelId,
+    modelName: meta.modelName,
+    provider: meta.provider,
+    apiFormat: meta.apiFormat,
     supportsImage: meta.supportsImage,
     supportsThinking: meta.supportsThinking,
     contextWindow: meta.contextWindow,
+    explicitContextCache: meta.explicitContextCache,
   })));
   serverModelMetadataCache = nextCache;
   return previous !== next;
@@ -117,30 +144,36 @@ export function clearServerModelMetadata(): void {
   serverModelMetadataCache.clear();
 }
 
-export function getAllServerModelMetadata(): Array<{ modelId: string; supportsImage?: boolean; supportsThinking?: boolean; contextWindow?: number }> {
+export function getAllServerModelMetadata(): ServerModelMetadata[] {
   return Array.from(serverModelMetadataCache.entries()).map(([modelId, meta]) => ({
     modelId,
+    modelName: meta.modelName,
+    provider: meta.provider,
+    apiFormat: meta.apiFormat,
     supportsImage: meta.supportsImage,
     supportsThinking: meta.supportsThinking,
     contextWindow: meta.contextWindow,
+    explicitContextCache: meta.explicitContextCache,
   }));
 }
 
 function buildServerFallbackModels(effectiveModelId: string): NonNullable<LocalProviderConfig['models']> {
   const models = getAllServerModelMetadata().map((model) => ({
     id: model.modelId,
-    name: model.modelId,
+    name: model.modelName || model.modelId,
     supportsImage: model.supportsImage,
     supportsThinking: model.supportsThinking,
+    contextWindow: model.contextWindow,
   }));
 
   if (!models.some(model => model.id === effectiveModelId)) {
     const cachedMeta = serverModelMetadataCache.get(effectiveModelId);
     models.unshift({
       id: effectiveModelId,
-      name: effectiveModelId,
+      name: cachedMeta?.modelName || effectiveModelId,
       supportsImage: cachedMeta?.supportsImage,
       supportsThinking: cachedMeta?.supportsThinking,
+      contextWindow: cachedMeta?.contextWindow,
     });
   }
 
@@ -231,20 +264,26 @@ function tryLobsteraiServerFallback(modelId?: string): MatchedProvider | null {
   if (!effectiveModelId) return null;
   const baseURL = `${serverBaseUrl}/api/proxy/v1`;
   const cachedMeta = serverModelMetadataCache.get(effectiveModelId);
+  const effectiveApiFormat = cachedMeta?.apiFormat
+    ? normalizeProviderApiFormat(cachedMeta.apiFormat)
+    : 'openai';
   console.debug('[ClaudeSettings] lobsterai-server provider resolved:', {
     baseURL,
     modelId: effectiveModelId,
+    apiFormat: effectiveApiFormat,
     supportsImage: cachedMeta?.supportsImage,
     supportsThinking: cachedMeta?.supportsThinking,
   });
   return {
     providerName: ProviderName.LobsteraiServer,
-    providerConfig: { enabled: true, apiKey: tokens.accessToken, baseUrl: baseURL, apiFormat: 'openai', models: buildServerFallbackModels(effectiveModelId) },
+    providerConfig: { enabled: true, apiKey: tokens.accessToken, baseUrl: baseURL, apiFormat: effectiveApiFormat, models: buildServerFallbackModels(effectiveModelId) },
     modelId: effectiveModelId,
-    apiFormat: 'openai',
+    apiFormat: effectiveApiFormat,
     baseURL,
     supportsImage: cachedMeta?.supportsImage,
     supportsThinking: cachedMeta?.supportsThinking,
+    modelName: cachedMeta?.modelName,
+    contextWindow: cachedMeta?.contextWindow,
   };
 }
 

@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import { IpcChannel as ScheduledTaskIpc } from '../scheduledTask/constants';
 import { AgentIpcChannel } from '../shared/agent/constants';
 import { AppIpcChannel } from '../shared/app/constants';
+import { AppSettingsIpc } from '../shared/appSettings/constants';
 import { AppUpdateIpc } from '../shared/appUpdate/constants';
 import { ArtifactPreviewIpc } from '../shared/artifactPreview/constants';
 import {
@@ -682,12 +683,12 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke(LocalWebServicesIpc.List, options) as Promise<LocalWebService[]>,
   },
   autoLaunch: {
-    get: () => ipcRenderer.invoke('app:getAutoLaunch'),
-    set: (enabled: boolean) => ipcRenderer.invoke('app:setAutoLaunch', enabled),
+    get: () => ipcRenderer.invoke(AppSettingsIpc.GetAutoLaunch),
+    set: (enabled: boolean) => ipcRenderer.invoke(AppSettingsIpc.SetAutoLaunch, enabled),
   },
   preventSleep: {
-    get: () => ipcRenderer.invoke('app:getPreventSleep'),
-    set: (enabled: boolean) => ipcRenderer.invoke('app:setPreventSleep', enabled),
+    get: () => ipcRenderer.invoke(AppSettingsIpc.GetPreventSleep),
+    set: (enabled: boolean) => ipcRenderer.invoke(AppSettingsIpc.SetPreventSleep, enabled),
   },
   appInfo: {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),

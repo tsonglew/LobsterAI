@@ -292,7 +292,7 @@ class AuthService {
     try {
       const modelsResult = await window.electron.auth.getModels();
       if (modelsResult.success && modelsResult.models) {
-        const serverModels: Model[] = modelsResult.models.map((m: { modelId: string; modelName: string; provider: string; apiFormat: string; supportsImage?: boolean; supportsThinking?: boolean; costMultiplier?: number; description?: string; accessible?: boolean; restrictionHint?: string }) => ({
+        const serverModels: Model[] = modelsResult.models.map((m: { modelId: string; modelName: string; provider: string; apiFormat: string; supportsImage?: boolean; supportsThinking?: boolean; contextWindow?: number; explicitContextCache?: boolean; costMultiplier?: number; description?: string; accessible?: boolean; restrictionHint?: string }) => ({
           id: m.modelId,
           name: m.modelName,
           provider: m.provider,
@@ -301,6 +301,8 @@ class AuthService {
           serverApiFormat: m.apiFormat,
           supportsImage: m.supportsImage ?? false,
           supportsThinking: m.supportsThinking ?? false,
+          contextWindow: m.contextWindow,
+          explicitContextCache: m.explicitContextCache ?? false,
           description: m.description,
           costMultiplier: m.costMultiplier,
           accessible: m.accessible ?? true,

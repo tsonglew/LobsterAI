@@ -18,9 +18,13 @@ const mockRuntimeState = vi.hoisted(() => ({
   proxyPort: null as number | null,
   serverModels: [] as Array<{
     modelId: string;
+    modelName?: string;
+    provider?: string;
+    apiFormat?: string;
     supportsImage?: boolean;
     supportsThinking?: boolean;
     contextWindow?: number;
+    explicitContextCache?: boolean;
   }>,
   enabledProviders: [] as Array<{
     providerName: string;
@@ -438,10 +442,63 @@ describe('OpenClawConfigSync runtime config output', () => {
   test('merges all server models into existing lobsterai provider and updates image input', async () => {
     mockRuntimeState.proxyPort = 56646;
     mockRuntimeState.serverModels = [
-      { modelId: 'qwen3.5-plus-YoudaoInner', supportsImage: true },
-      { modelId: 'qwen3.6-plus-YoudaoInner', supportsImage: true },
-      { modelId: 'glm-5.1-YoudaoInner', supportsImage: false, supportsThinking: true },
-      { modelId: 'deepseek-v3.2-YoudaoInner', supportsImage: false },
+      {
+        modelId: 'qwen3.5-plus-YoudaoInner',
+        modelName: 'qwen3.5-plus-YoudaoInner',
+        provider: 'YoudaoInner',
+        apiFormat: 'openai',
+        supportsImage: true,
+        explicitContextCache: true,
+      },
+      {
+        modelId: 'qwen3.6-plus-YoudaoInner',
+        modelName: 'qwen3.6-plus-YoudaoInner',
+        provider: 'YoudaoInner',
+        apiFormat: 'openai',
+        supportsImage: true,
+        explicitContextCache: true,
+      },
+      {
+        modelId: 'claude-sonnet-4-6-YoudaoInner',
+        modelName: 'claude-sonnet-4-6-YoudaoInner',
+        provider: 'YoudaoInner',
+        apiFormat: 'anthropic',
+        supportsImage: true,
+        supportsThinking: true,
+        contextWindow: 1_000_000,
+        explicitContextCache: true,
+      },
+      {
+        modelId: 'claude-opus-4-YoudaoInner',
+        modelName: 'claude-opus-4-YoudaoInner',
+        provider: 'YoudaoInner',
+        apiFormat: 'anthropic',
+        supportsImage: true,
+        supportsThinking: true,
+      },
+      {
+        modelId: 'claude-sonnet-4-6',
+        modelName: 'Claude Sonnet 4.6 OpenAI Compat',
+        provider: 'YoudaoInner',
+        apiFormat: 'openai',
+        supportsImage: true,
+        supportsThinking: true,
+        contextWindow: 1_000_000,
+        explicitContextCache: true,
+      },
+      {
+        modelId: 'glm-5.1-YoudaoInner',
+        provider: 'YoudaoInner',
+        apiFormat: 'openai',
+        supportsImage: false,
+        supportsThinking: true,
+      },
+      {
+        modelId: 'deepseek-v3.2-YoudaoInner',
+        provider: 'YoudaoInner',
+        apiFormat: 'openai',
+        supportsImage: false,
+      },
     ];
     mockRuntimeState.rawApiConfig = {
       config: {
@@ -507,24 +564,257 @@ describe('OpenClawConfigSync runtime config output', () => {
     expect(provider.models).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: 'qwen3.5-plus-YoudaoInner',
+        api: 'openai-completions',
         input: ['text', 'image'],
       }),
       expect.objectContaining({
         id: 'qwen3.6-plus-YoudaoInner',
+        api: 'openai-completions',
         input: ['text', 'image'],
       }),
       expect.objectContaining({
+        id: 'claude-sonnet-4-6-YoudaoInner',
+        api: 'anthropic-messages',
+        input: ['text', 'image'],
+        reasoning: true,
+        contextWindow: 1_000_000,
+      }),
+      expect.objectContaining({
+        id: 'claude-opus-4-YoudaoInner',
+        api: 'anthropic-messages',
+        input: ['text', 'image'],
+        reasoning: true,
+      }),
+      expect.objectContaining({
+        id: 'claude-sonnet-4-6',
+        api: 'openai-completions',
+        input: ['text', 'image'],
+        reasoning: true,
+        contextWindow: 1_000_000,
+      }),
+      expect.objectContaining({
         id: 'glm-5.1-YoudaoInner',
+        api: 'openai-completions',
         input: ['text'],
         reasoning: true,
       }),
       expect.objectContaining({
         id: 'deepseek-v3.2-YoudaoInner',
+        api: 'openai-completions',
         input: ['text'],
       }),
     ]));
-    expect(provider.models).toHaveLength(4);
-    expect(config.agents.defaults.models).toBeUndefined();
+    expect(provider.models).toHaveLength(7);
+    expect(JSON.stringify(provider.models)).not.toContain('cacheControlFormat');
+    expect(JSON.stringify(provider.models)).not.toContain('supportsLongCacheRetention');
+    expect(config.agents.defaults.models).toEqual(expect.objectContaining({
+      'lobsterai-server/qwen3.5-plus-YoudaoInner': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'dashscope',
+          contextCacheMode: 'explicit',
+        },
+      },
+      'lobsterai-server/qwen3.6-plus-YoudaoInner': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'dashscope',
+          contextCacheMode: 'explicit',
+        },
+      },
+      'lobsterai-server/claude-sonnet-4-6-YoudaoInner': {
+        params: {
+          cacheRetention: 'short',
+        },
+      },
+      'lobsterai-server/claude-opus-4-YoudaoInner': {
+        params: {
+          cacheRetention: 'short',
+        },
+      },
+      'lobsterai-server/claude-sonnet-4-6': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'anthropic-compatible',
+          contextCacheMode: 'explicit',
+        },
+      },
+    }));
+  });
+
+  test('writes Claude OpenAI-compatible explicit cache params when server metadata is not loaded', async () => {
+    mockRuntimeState.proxyPort = 56646;
+    mockRuntimeState.serverModels = [];
+    mockRuntimeState.rawApiConfig = {
+      config: {
+        baseURL: 'https://lobsterai-server.youdao.com/api/proxy/v1',
+        apiKey: 'access-token',
+        model: 'claude-sonnet-4-6',
+        apiType: 'openai',
+      },
+      providerMetadata: {
+        providerName: 'lobsterai-server',
+        codingPlanEnabled: false,
+        supportsImage: true,
+        supportsThinking: true,
+        modelName: 'Claude Sonnet 4.6',
+      },
+    };
+
+    const sync = await createSync();
+
+    const result = sync.sync('server-model-cache-default-without-metadata');
+    expect(result.ok).toBe(true);
+
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(config.models.providers['lobsterai-server'].models).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'claude-sonnet-4-6',
+        api: 'openai-completions',
+      }),
+    ]));
+    expect(config.agents.defaults.models).toEqual(expect.objectContaining({
+      'lobsterai-server/claude-sonnet-4-6': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'anthropic-compatible',
+          contextCacheMode: 'explicit',
+        },
+      },
+    }));
+  });
+
+  test('writes explicit cache params for Anthropic, Qwen, and custom providers', async () => {
+    const { ProviderName } = await import('../../shared/providers');
+
+    mockRuntimeState.rawApiConfig = {
+      config: {
+        baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        apiKey: 'sk-qwen',
+        model: 'qwen3.5-plus',
+        apiType: 'openai',
+      },
+      providerMetadata: {
+        providerName: ProviderName.Qwen,
+        codingPlanEnabled: false,
+        supportsImage: true,
+        modelName: 'Qwen3.5 Plus',
+      },
+    };
+    mockRuntimeState.enabledProviders = [
+      {
+        providerName: ProviderName.Qwen,
+        baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        apiKey: 'sk-qwen',
+        apiType: 'openai',
+        codingPlanEnabled: false,
+        models: [
+          { id: 'qwen3.5-plus', name: 'Qwen3.5 Plus', supportsImage: true },
+          { id: 'qwen3.6-plus', name: 'Qwen3.6 Plus', supportsImage: true },
+          { id: 'qwen3.7-plus', name: 'Qwen3.7 Plus', supportsImage: true },
+        ],
+      },
+      {
+        providerName: ProviderName.Anthropic,
+        baseURL: 'https://api.anthropic.com',
+        apiKey: 'sk-anthropic',
+        apiType: 'anthropic',
+        codingPlanEnabled: false,
+        models: [
+          { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', supportsImage: true, supportsThinking: true },
+          { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', supportsImage: true, supportsThinking: true },
+        ],
+      },
+      {
+        providerName: 'custom_0',
+        baseURL: 'https://example.com/v1',
+        apiKey: 'sk-custom',
+        apiType: 'openai',
+        codingPlanEnabled: false,
+        models: [
+          {
+            id: 'claude-opus-4-6',
+            name: 'Claude Opus 4.6',
+            supportsImage: true,
+            customParams: { metadata: 'custom-cache' },
+          },
+          { id: 'anthropic/claude-sonnet-4-6', name: 'Namespaced Claude Sonnet 4.6', supportsImage: true },
+          { id: 'qwen3.5-plus', name: 'Qwen3.5 Plus', supportsImage: true },
+          { id: 'qwen3.6-plus', name: 'Qwen3.6 Plus', supportsImage: true },
+          { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', supportsImage: false },
+          { id: 'gpt-5.5-2026-04-24', name: 'GPT 5.5', supportsImage: true },
+        ],
+      },
+    ];
+
+    const sync = await createSync();
+
+    const result = sync.sync('provider-explicit-cache-defaults');
+    expect(result.ok).toBe(true);
+
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const modelDefaults = config.agents.defaults.models;
+
+    expect(modelDefaults).toEqual(expect.objectContaining({
+      'qwen/qwen3.5-plus': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'dashscope',
+          contextCacheMode: 'explicit',
+        },
+      },
+      'qwen/qwen3.6-plus': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'dashscope',
+          contextCacheMode: 'explicit',
+        },
+      },
+      'qwen/qwen3.7-plus': {},
+      'anthropic/claude-opus-4-7': {
+        params: {
+          cacheRetention: 'short',
+        },
+      },
+      'anthropic/claude-sonnet-4-6': {
+        params: {
+          cacheRetention: 'short',
+        },
+      },
+      'custom_0/claude-opus-4-6': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'anthropic-compatible',
+          contextCacheMode: 'explicit',
+          extra_body: {
+            metadata: 'custom-cache',
+          },
+        },
+      },
+      'custom_0/anthropic/claude-sonnet-4-6': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'anthropic-compatible',
+          contextCacheMode: 'explicit',
+        },
+      },
+      'custom_0/qwen3.5-plus': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'dashscope',
+          contextCacheMode: 'explicit',
+        },
+      },
+      'custom_0/qwen3.6-plus': {
+        params: {
+          cacheRetention: 'short',
+          contextCacheProvider: 'dashscope',
+          contextCacheMode: 'explicit',
+        },
+      },
+      'custom_0/deepseek-v4-pro': {},
+      'custom_0/gpt-5.5-2026-04-24': {},
+    }));
   });
 
   test('writes a complete agent model allowlist when any model has custom params', async () => {
